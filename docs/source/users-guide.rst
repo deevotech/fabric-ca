@@ -52,14 +52,15 @@ Table of Contents
    1. `Enrolling the bootstrap identity`_
    2. `Registering a new identity`_
    3. `Enrolling a peer identity`_
-   4. `Getting a CA certificate chain from another Fabric CA server`_
-   5. `Reenrolling an identity`_
-   6. `Revoking a certificate or identity`_
-   7. `Generating a CRL (Certificate Revocation List)`_
-   8. `Attribute-Based Access Control`_
-   9. `Dynamic Server Configuration Update`_
-   10. `Enabling TLS`_
-   11. `Contact specific CA instance`_
+   4. `Getting Identity Mixer credential for a user`_
+   5. `Getting Idemix CRI`_
+   6. `Reenrolling an identity`_
+   7. `Revoking a certificate or identity`_
+   8. `Generating a CRL (Certificate Revocation List)`_
+   9. `Attribute-Based Access Control`_
+   10. `Dynamic Server Configuration Update`_
+   11. `Enabling TLS`_
+   12. `Contact specific CA instance`_
 
 6. `HSM`_
 
@@ -107,7 +108,7 @@ Getting Started
 Prerequisites
 ~~~~~~~~~~~~~~~
 
--  Go 1.9+ installation
+-  Go 1.10+ installation
 -  ``GOPATH`` environment variable is set correctly
 - libtool and libtdhl-dev packages are installed
 
@@ -1451,6 +1452,56 @@ certificate in the chain is followed by its issuer's CA certificate. If you need
 to return the CA chain in the opposite order, then set the environment variable ``CA_CHAIN_PARENT_FIRST``
 to ``true`` and restart the Fabric CA server. The Fabric CA client will handle either order appropriately.
 
+Getting Identity Mixer credential for a user
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Identity Mixer (Idemix) is a cryptographic protocol suite for privacy-preserving authentication and transfer of certified attributes.
+Idemix allows users to authenticate with verifiers without the involvement of the issuer (CA) and selectively disclose only those attributes
+that are required by the verifier and can do so without being linkable across their transactions.
+
+Fabric CA server can issue Idemix credentials in addition to X509 certificates. An Idemix credential can be requested by sending the request to
+the ``/api/v1/idemix/credential`` API endpoint. For more information on this and other Fabric CA server API endpoints, please refer to
+`swagger-fabric-ca.json <https://github.com/hyperledger/fabric-ca/blob/master/swagger/swagger-fabric-ca.json>`_.
+
+The Idemix credential issuance is a two step process. First, send a request with an empty body to the ``/api/v1/idemix/credential``
+API endpoint to get a nonce and CA's Idemix public key. Second, create a credential request using the nonce and CA's Idemix public key and
+send another request with the credential request in the body to  the ``/api/v1/idemix/credential`` API endpoint to get an Idemix credential,
+Credential Revocation Information (CRI), and attribute names and values. Currently, only three attributes are supported:
+
+- **OU** - organization unit of the user. The value of this attribute is set to user's affiliation. For example, if user's affiliaton is `dept1.unit1`, then OU attribute is set to `dept1.unit1`
+- **IsAdmin** - if the user is an admin or not. The value of this attribute is set to the value of `isAdmin` registration attribute.
+- **EnrollmentID** - enrollment ID of the user
+
+You can refer to the `handleIdemixEnroll` function in https://github.com/hyperledger/fabric-ca/blob/master/lib/client.go for reference implementation
+of the two step process for getting Idemix credential.
+
+The ``/api/v1/idemix/credential`` API endpoint accepts both basic and token authorization headers. The basic authorization header should
+contain User's registration ID and password. If the user already has X509 enrollment certificate, it can also be used to create a token authorization header.
+
+Note that Hyperledger Fabric will support clients/users to sign transactions with both X509 and Idemix credentials, but will only support X509 credentials
+for peer and orderer identities. As before, applications can use a Fabric SDK to send requests to the Fabric CA server. SDKs hide the complexity
+associated with creating authorization header and request payload, and with processing the response.
+
+Getting Idemix CRI (Certificate Revocation Information)
+-----------------------------------------------
+An Idemix CRI (Credential Revocation Information) is similar in purpose to an X509 CRL (Certificate Revocation List):
+to revoke what was previously issued.  However, there are some differences.
+
+In X509, the issuer revokes an end user's certificate and its ID is included in the CRL.
+The verifier checks to see if the user's certificate is in the CRL and if so, returns an authorization failure.
+The end user is not involved in this revocation process, other than receiving an authorization error from a verifier.
+
+In Idemix, the end user is involved.  The issuer revokes an end user's credential similar to X509 and evidence of this
+revocation is recorded in the CRI.  The CRI is given to the end user (aka "prover").  The end user then generates a
+proof that their credential has not been revoked according to the CRI.  The end user gives this proof to the verifier
+who verifies the proof according to the CRI.
+For verification to succeed, the version of the CRI (known as the "epoch") used by the end user and verifier must be same.
+The latest CRI can be requested by sending a request to ``/api/v1/idemix/cri`` API endpoint.
+
+The version of the CRI is incremented when an enroll request is received by the fabric-ca-server and there are no revocation
+handles remaining in the revocation handle pool. In this case, the fabric-ca-server must generate a new pool of revocation
+handles which increments the epoch of the CRI. The number of revocation handles in the revocation handle pool is configurable
+via the ``idemix.rhpoolsize`` server configuration property.
+
 Reenrolling an Identity
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1584,11 +1635,6 @@ before 2017-09-21T16:39:57-08:00, and that expire after 2017-09-13T16:39:57-08:0
     export FABRIC_CA_CLIENT_HOME=~/clientconfig
     fabric-ca-client gencrl --caname "" --expireafter 2017-09-13T16:39:57-08:00 --expirebefore 2018-09-13T16:39:57-08:00  --revokedafter 2017-09-13T16:39:57-08:00 --revokedbefore 2017-09-21T16:39:57-08:00 -M ~/msp
 
-The `fabric-samples/fabric-ca <https://github.com/hyperledger/fabric-samples/blob/master/fabric-ca/scripts/run-fabric.sh>`_
-sample demonstrates how to generate a CRL that contains certificate of a revoked user and update the channel
-msp. It will then demonstrate that querying the channel using the revoked user credentials will result
-in an authorization error.
-
 Enabling TLS
 ~~~~~~~~~~~~
 
@@ -1690,10 +1736,7 @@ value of the affiliation (which is 'org1') must be the same in both the
     fabric-ca-client register --id.name user1 --id.secret user1pw --id.type user --id.affiliation org1 --id.attrs 'hf.Affiliation=org1:ecert'
 
 For information on the chaincode library API for Attribute-Based Access Control,
-see `https://github.com/hyperledger/fabric/tree/release-1.1/core/chaincode/lib/cid/README.md <https://github.com/hyperledger/fabric/tree/release-1.1/core/chaincode/lib/cid/README.md>`_
-
-For an end-to-end sample which demonstrates Attribute-Based Access Control and more,
-see `https://github.com/hyperledger/fabric-samples/tree/release-1.1/fabric-ca/README.md <https://github.com/hyperledger/fabric-samples/tree/release-1.1/fabric-ca/README.md>`_
+see `https://github.com/hyperledger/fabric/blob/release-1.4/core/chaincode/lib/cid/README.md <https://github.com/hyperledger/fabric/blob/release-1.4/core/chaincode/lib/cid/README.md>`_
 
 Dynamic Server Configuration Update
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2164,8 +2207,21 @@ Configuring Fabric CA server to use softhsm2
 This section shows how to configure the Fabric CA server or client to use a software version
 of PKCS11 called softhsm (see https://github.com/opendnssec/SoftHSMv2).
 
-After installing softhsm, create a token, label it “ForFabric”, set the pin to ‘98765432’
+After installing softhsm, make sure to set your SOFTHSM2_CONF environment variable to
+point to the location where the softhsm2 configuration file is stored. The config file looks like
+
+.. code::
+
+  directories.tokendir = /tmp/
+  objectstore.backend = file
+  log.level = INFO
+
+You can find example configuration file named softhsm2.conf under testdata directory.
+
+Create a token, label it “ForFabric”, set the pin to ‘98765432’
 (refer to softhsm documentation).
+
+
 
 You can use both the config file and environment variables to configure BCCSP
 For example, set the bccsp section of Fabric CA server configuration file as follows.
@@ -2191,10 +2247,12 @@ Note that the default field’s value is PKCS11.
 
 And you can override relevant fields via environment variables as follows:
 
-FABRIC_CA_SERVER_BCCSP_DEFAULT=PKCS11
-FABRIC_CA_SERVER_BCCSP_PKCS11_LIBRARY=/usr/local/Cellar/softhsm/2.1.0/lib/softhsm/libsofthsm2.so
-FABRIC_CA_SERVER_BCCSP_PKCS11_PIN=98765432
-FABRIC_CA_SERVER_BCCSP_PKCS11_LABEL=ForFabric
+.. code:: bash
+
+  FABRIC_CA_SERVER_BCCSP_DEFAULT=PKCS11
+  FABRIC_CA_SERVER_BCCSP_PKCS11_LIBRARY=/usr/local/Cellar/softhsm/2.1.0/lib/softhsm/libsofthsm2.so
+  FABRIC_CA_SERVER_BCCSP_PKCS11_PIN=98765432
+  FABRIC_CA_SERVER_BCCSP_PKCS11_LABEL=ForFabric
 
 `Back to Top`_
 
@@ -2291,3 +2349,4 @@ Troubleshooting
 
 .. Licensed under Creative Commons Attribution 4.0 International License
    https://creativecommons.org/licenses/by/4.0/
+ƒ

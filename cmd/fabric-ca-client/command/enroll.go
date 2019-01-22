@@ -11,9 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pkg/errors"
-
 	"github.com/cloudflare/cfssl/log"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -85,10 +84,9 @@ func (c *enrollCmd) runEnroll(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// err = storeIssuerPublicKey(cfg, &resp.CAInfo)
-	// if err != nil {
-	// 	return err
-	// }
-	// return storeIssuerRevocationPublicKey(cfg, &resp.CAInfo)
-	return nil
+	err = storeIssuerPublicKey(cfg, &resp.CAInfo)
+	if err != nil {
+		return err
+	}
+	return storeIssuerRevocationPublicKey(cfg, &resp.CAInfo)
 }

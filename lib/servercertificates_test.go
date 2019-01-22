@@ -1,37 +1,28 @@
 /*
-Copyright IBM Corp. 2018 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
+
 package lib
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"net/http"
-	"path/filepath"
-	"testing"
-
-	"fmt"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"testing"
 
 	"github.com/cloudflare/cfssl/certdb"
 	"github.com/hyperledger/fabric-ca/api"
+	"github.com/hyperledger/fabric-ca/lib/caerrors"
 	"github.com/hyperledger/fabric-ca/lib/dbutil"
 	"github.com/hyperledger/fabric-ca/lib/mocks"
-	"github.com/hyperledger/fabric-ca/lib/server"
+	"github.com/hyperledger/fabric-ca/lib/server/certificaterequest"
 	"github.com/hyperledger/fabric-ca/util"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -52,10 +43,10 @@ func TestAuthChecks(t *testing.T) {
 	util.ErrorContains(t, err, "Failed to get caller", "Expected to catch error from GetCaller() func")
 
 	ctx := new(serverRequestContextImpl)
-	user := &UserRecord{
+	user := &dbutil.UserRecord{
 		Name: "NotRegistrar",
 	}
-	ctx.caller = newDBUser(user, nil)
+	ctx.caller = dbutil.NewDBUser(user, nil)
 	err = authChecks(ctx)
 	assert.Error(t, err, "Caller does not possess the appropriate attributes to request manage certificates")
 
@@ -68,11 +59,11 @@ func TestAuthChecks(t *testing.T) {
 
 	attr, err := util.Marshal(attributes, "attributes")
 	util.FatalError(t, err, "Failed to marshal attributes")
-	user = &UserRecord{
+	user = &dbutil.UserRecord{
 		Name:       "Registrar",
 		Attributes: string(attr),
 	}
-	ctx.caller = newDBUser(user, nil)
+	ctx.caller = dbutil.NewDBUser(user, nil)
 	err = authChecks(ctx)
 	assert.NoError(t, err, "Should not fail, caller has 'hf.Registrar.Roles' attribute")
 
@@ -84,11 +75,11 @@ func TestAuthChecks(t *testing.T) {
 	}
 	attr, err = util.Marshal(attributes, "attributes")
 	util.FatalError(t, err, "Failed to marshal attributes")
-	user = &UserRecord{
+	user = &dbutil.UserRecord{
 		Name:       "Revoker",
 		Attributes: string(attr),
 	}
-	ctx.caller = newDBUser(user, nil)
+	ctx.caller = dbutil.NewDBUser(user, nil)
 	err = authChecks(ctx)
 	assert.NoError(t, err, "Should not fail, caller has 'hf.Revoker' with a value of 'true' attribute")
 
@@ -101,11 +92,11 @@ func TestAuthChecks(t *testing.T) {
 	}
 	attr, err = util.Marshal(attributes, "attributes")
 	util.FatalError(t, err, "Failed to marshal attributes")
-	user = &UserRecord{
+	user = &dbutil.UserRecord{
 		Name:       "NotRevoker",
 		Attributes: string(attr),
 	}
-	ctx.caller = newDBUser(user, nil)
+	ctx.caller = dbutil.NewDBUser(user, nil)
 	err = authChecks(ctx)
 	assert.Error(t, err, "Should fail, caller has 'hf.Revoker' but with a value of 'false' attribute")
 }
@@ -121,20 +112,20 @@ func TestProcessCertificateRequest(t *testing.T) {
 	ctx.On("HasRole", "hf.Revoker").Return(errors.New("Does not have attribute"))
 	attr, err := util.Marshal([]api.Attribute{}, "attributes")
 	util.FatalError(t, err, "Failed to marshal attributes")
-	user := &UserRecord{
+	user := &dbutil.UserRecord{
 		Name:       "NotRevoker",
 		Attributes: string(attr),
 	}
-	ctx.On("GetCaller").Return(newDBUser(user, nil), nil)
+	ctx.On("GetCaller").Return(dbutil.NewDBUser(user, nil), nil)
 
 	err = processCertificateRequest(ctx)
 	t.Log("Error: ", err)
-	util.ErrorContains(t, err, fmt.Sprintf("%d", ErrAuthFailure), "Should have failed to due improper permissions")
+	util.ErrorContains(t, err, fmt.Sprintf("%d", caerrors.ErrAuthorizationFailure), "Should have failed to due improper permissions")
 
 	ctx = new(mocks.ServerRequestContext)
 	ctx.On("TokenAuthentication").Return("", nil)
 	ctx.On("HasRole", "hf.Revoker").Return(nil)
-	ctx.On("GetCaller").Return(newDBUser(user, nil), nil)
+	ctx.On("GetCaller").Return(dbutil.NewDBUser(user, nil), nil)
 	req, err := http.NewRequest("POST", "", bytes.NewReader([]byte{}))
 	util.FatalError(t, err, "Failed to get HTTP request")
 	ctx.On("GetReq").Return(req)
@@ -225,10 +216,10 @@ func TestServerGetCertificates(t *testing.T) {
 	req, err := http.NewRequest("GET", "", bytes.NewReader([]byte{}))
 	util.FatalError(t, err, "Failed to get GET HTTP request")
 
-	user := &UserRecord{
+	user := &dbutil.UserRecord{
 		Name: "NotRevoker",
 	}
-	ctx.caller = newDBUser(user, nil)
+	ctx.caller = dbutil.NewDBUser(user, nil)
 
 	ctx.req = req
 	ctx.ca = ca
@@ -241,7 +232,7 @@ func TestServerGetCertificates(t *testing.T) {
 	}, "testCertificate", ca)
 	util.FatalError(t, err, "Failed to insert certificate with serial/AKI")
 
-	err = getCertificates(ctx, &server.CertificateRequestImpl{})
+	err = getCertificates(ctx, &certificaterequest.Impl{})
 	assert.NoError(t, err, "Should not have returned error, failed to process GET certificate request")
 
 	mockCtx := new(mocks.ServerRequestContext)
@@ -250,11 +241,11 @@ func TestServerGetCertificates(t *testing.T) {
 	err = getCertificates(mockCtx, nil)
 	util.ErrorContains(t, err, "failed to get caller", "did not get correct error response")
 
-	testUser := newDBUser(&UserRecord{Name: "testuser"}, nil)
+	testUser := dbutil.NewDBUser(&dbutil.UserRecord{Name: "testuser"}, nil)
 	mockCtx = new(mocks.ServerRequestContext)
 	mockCtx.On("GetResp").Return(nil)
 	mockCtx.On("GetCaller").Return(testUser, nil)
-	mockCtx.On("GetCertificates", (*server.CertificateRequestImpl)(nil), "").Return(nil, errors.New("failed to get certificates"))
+	mockCtx.On("GetCertificates", (*certificaterequest.Impl)(nil), "").Return(nil, errors.New("failed to get certificates"))
 	err = getCertificates(mockCtx, nil)
 	util.ErrorContains(t, err, "failed to get certificates", "did not get correct error response")
 }

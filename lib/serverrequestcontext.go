@@ -16,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jmoiron/sqlx"
-
 	"github.com/cloudflare/cfssl/config"
 	"github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/revoke"
@@ -25,11 +23,13 @@ import (
 	gmux "github.com/gorilla/mux"
 	"github.com/hyperledger/fabric-ca/api"
 	"github.com/hyperledger/fabric-ca/lib/attr"
-	"github.com/hyperledger/fabric-ca/lib/server"
+	"github.com/hyperledger/fabric-ca/lib/caerrors"
+	cr "github.com/hyperledger/fabric-ca/lib/server/certificaterequest"
 	"github.com/hyperledger/fabric-ca/lib/server/idemix"
 	"github.com/hyperledger/fabric-ca/lib/spi"
 	"github.com/hyperledger/fabric-ca/util"
 	"github.com/hyperledger/fabric/common/attrmgr"
+	"github.com/jmoiron/sqlx"
 	"github.com/pkg/errors"
 )
 
@@ -44,7 +44,11 @@ type ServerRequestContext interface {
 	GetQueryParm(name string) string
 	GetBoolQueryParm(name string) (bool, error)
 	GetResp() http.ResponseWriter
-	GetCertificates(server.CertificateRequest, string) (*sqlx.Rows, error)
+	GetCertificates(cr.CertificateRequest, string) (*sqlx.Rows, error)
+	IsLDAPEnabled() bool
+	ReadBody(interface{}) error
+	ContainsAffiliation(string) error
+	CanActOnType(string) error
 }
 
 // serverRequestContextImpl represents an HTTP request/response context in the server
@@ -85,12 +89,12 @@ func (ctx *serverRequestContextImpl) BasicAuthentication() (string, error) {
 	// Get the authorization header
 	authHdr := r.Header.Get("authorization")
 	if authHdr == "" {
-		return "", newHTTPErr(401, ErrNoAuthHdr, "No authorization header")
+		return "", caerrors.NewHTTPErr(401, caerrors.ErrNoAuthHdr, "No authorization header")
 	}
 	// Extract the username and password from the header
 	username, password, ok := r.BasicAuth()
 	if !ok {
-		return "", newAuthErr(ErrNoUserPass, "No user/pass in authorization header")
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrNoUserPass, "No user/pass in authorization header")
 	}
 	// Get the CA that is targeted by this request
 	ca, err := ctx.GetCA()
@@ -101,17 +105,28 @@ func (ctx *serverRequestContextImpl) BasicAuthentication() (string, error) {
 	log.Debugf("ca.Config: %+v", ca.Config)
 	caMaxEnrollments := ca.Config.Registry.MaxEnrollments
 	if caMaxEnrollments == 0 {
-		return "", newAuthErr(ErrEnrollDisabled, "Enroll is disabled")
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrEnrollDisabled, "Enroll is disabled")
 	}
 	// Get the user info object for this user
 	ctx.ui, err = ca.registry.GetUser(username, nil)
 	if err != nil {
-		return "", newAuthErr(ErrInvalidUser, "Failed to get user: %s", err)
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrInvalidUser, "Failed to get user: %s", err)
 	}
+
+	attempts := ctx.ui.GetFailedLoginAttempts()
+	allowedAttempts := ca.Config.Cfg.Identities.PasswordAttempts
+	if allowedAttempts > 0 {
+		if attempts == ca.Config.Cfg.Identities.PasswordAttempts {
+			msg := fmt.Sprintf("Incorrect password entered %d times, max incorrect password limit of %d reached", attempts, ca.Config.Cfg.Identities.PasswordAttempts)
+			log.Errorf(msg)
+			return "", caerrors.NewHTTPErr(401, caerrors.ErrPasswordAttempts, msg)
+		}
+	}
+
 	// Check the user's password and max enrollments if supported by registry
 	err = ctx.ui.Login(password, caMaxEnrollments)
 	if err != nil {
-		return "", newAuthErr(ErrInvalidPass, "Login failure: %s", err)
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrInvalidPass, "Login failure: %s", err)
 	}
 	// Store the enrollment ID associated with this server request context
 	ctx.enrollmentID = username
@@ -131,7 +146,7 @@ func (ctx *serverRequestContextImpl) TokenAuthentication() (string, error) {
 	// Get the authorization header
 	authHdr := r.Header.Get("authorization")
 	if authHdr == "" {
-		return "", newHTTPErr(401, ErrNoAuthHdr, "No authorization header")
+		return "", caerrors.NewHTTPErr(401, caerrors.ErrNoAuthHdr, "No authorization header")
 	}
 	// Get the CA
 	ca, err := ctx.GetCA()
@@ -144,21 +159,43 @@ func (ctx *serverRequestContextImpl) TokenAuthentication() (string, error) {
 		return "", err
 	}
 	if idemix.IsToken(authHdr) {
-		return ctx.ca.issuer.VerifyToken(authHdr, body)
+		return ctx.verifyIdemixToken(authHdr, r.Method, r.URL.RequestURI(), body)
 	}
-	return ctx.verifyX509Token(ca, authHdr, body)
+	return ctx.verifyX509Token(ca, authHdr, r.Method, r.URL.RequestURI(), body)
 }
 
-func (ctx *serverRequestContextImpl) verifyX509Token(ca *CA, authHdr string, body []byte) (string, error) {
+func (ctx *serverRequestContextImpl) verifyIdemixToken(authHdr, method, uri string, body []byte) (string, error) {
+	log.Debug("Caller is using Idemix credential")
+	var err error
+
+	ctx.enrollmentID, err = ctx.ca.issuer.VerifyToken(authHdr, method, uri, body)
+	if err != nil {
+		return "", err
+	}
+
+	caller, err := ctx.GetCaller()
+	if err != nil {
+		return "", err
+	}
+
+	if caller.IsRevoked() {
+		return "", caerrors.NewAuthorizationErr(caerrors.ErrRevokedID, "Enrollment ID is revoked, unable to process request")
+	}
+
+	return ctx.enrollmentID, nil
+}
+
+func (ctx *serverRequestContextImpl) verifyX509Token(ca *CA, authHdr, method, uri string, body []byte) (string, error) {
+	log.Debug("Caller is using a x509 certificate")
 	// Verify the token; the signature is over the header and body
-	cert, err2 := util.VerifyToken(ca.csp, authHdr, body)
+	cert, err2 := util.VerifyToken(ca.csp, authHdr, method, uri, body, ca.server.Config.CompMode1_3)
 	if err2 != nil {
-		return "", newAuthErr(ErrInvalidToken, "Invalid token in authorization header: %s", err2)
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrInvalidToken, "Invalid token in authorization header: %s", err2)
 	}
 	// Make sure the caller's cert was issued by this CA
 	err2 = ca.VerifyCertificate(cert)
 	if err2 != nil {
-		return "", newAuthErr(ErrUntrustedCertificate, "Untrusted certificate: %s", err2)
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrUntrustedCertificate, "Untrusted certificate: %s", err2)
 	}
 	id := util.GetEnrollmentIDFromX509Certificate(cert)
 	log.Debugf("Checking for revocation/expiration of certificate owned by '%s'", id)
@@ -167,28 +204,25 @@ func (ctx *serverRequestContextImpl) verifyX509Token(ca *CA, authHdr string, bod
 	// expired and checks the CRL for the server.
 	expired, checked := revoke.VerifyCertificate(cert)
 	if !checked {
-		return "", newHTTPErr(401, ErrCertRevokeCheckFailure, "Failed while checking for revocation")
+		return "", caerrors.NewHTTPErr(401, caerrors.ErrCertRevokeCheckFailure, "Failed while checking for revocation")
 	}
 	if expired {
-		return "", newAuthErr(ErrCertExpired,
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrCertExpired,
 			"The certificate in the authorization header is a revoked or expired certificate")
 	}
 	aki := hex.EncodeToString(cert.AuthorityKeyId)
 	serial := util.GetSerialAsHex(cert.SerialNumber)
 	aki = strings.ToLower(strings.TrimLeft(aki, "0"))
 	serial = strings.ToLower(strings.TrimLeft(serial, "0"))
-	certs, err := ca.CertDBAccessor().GetCertificate(serial, aki)
+
+	certificate, err := ca.GetCertificate(serial, aki)
 	if err != nil {
-		return "", newHTTPErr(500, ErrCertNotFound, "Failed searching certificates: %s", err)
+		return "", err
 	}
-	if len(certs) == 0 {
-		return "", newAuthErr(ErrCertNotFound, "Certificate not found with AKI '%s' and serial '%s'", aki, serial)
+	if certificate.Status == "revoked" {
+		return "", caerrors.NewAuthenticationErr(caerrors.ErrCertRevoked, "The certificate in the authorization header is a revoked certificate")
 	}
-	for _, certificate := range certs {
-		if certificate.Status == "revoked" {
-			return "", newAuthErr(ErrCertRevoked, "The certificate in the authorization header is a revoked certificate")
-		}
-	}
+
 	ctx.enrollmentID = id
 	ctx.enrollmentCert = cert
 	ctx.caller, err = ctx.GetCaller()
@@ -251,7 +285,10 @@ func (ctx *serverRequestContextImpl) GetAttrExtension(attrReqs []*api.AttributeR
 	if err != nil {
 		return nil, err
 	}
-	allAttrs, _ := ui.GetAttributes(nil)
+	allAttrs, err := ui.GetAttributes(nil)
+	if err != nil {
+		return nil, err
+	}
 	if attrReqs == nil {
 		attrReqs = getDefaultAttrReqs(allAttrs)
 		if attrReqs == nil {
@@ -314,7 +351,7 @@ func (ctx *serverRequestContextImpl) ReadBody(body interface{}) error {
 		return err
 	}
 	if empty {
-		return newHTTPErr(400, ErrEmptyReqBody, "Empty request body")
+		return caerrors.NewHTTPErr(400, caerrors.ErrEmptyReqBody, "Empty request body")
 	}
 	return nil
 }
@@ -329,7 +366,7 @@ func (ctx *serverRequestContextImpl) TryReadBody(body interface{}) (bool, error)
 	if !empty {
 		err = json.Unmarshal(buf, body)
 		if err != nil {
-			return true, newHTTPErr(400, ErrBadReqBody, "Invalid request body: %s; body=%s",
+			return true, caerrors.NewHTTPErr(400, caerrors.ErrBadReqBody, "Invalid request body: %s; body=%s",
 				err, string(buf))
 		}
 	}
@@ -347,7 +384,7 @@ func (ctx *serverRequestContextImpl) ReadBodyBytes() ([]byte, error) {
 	}
 	err := ctx.body.err
 	if err != nil {
-		return nil, newHTTPErr(400, ErrReadingReqBody, "Failed reading request body: %s", err)
+		return nil, caerrors.NewHTTPErr(400, caerrors.ErrReadingReqBody, "Failed reading request body: %s", err)
 	}
 	return ctx.body.buf, nil
 }
@@ -414,7 +451,7 @@ func (ctx *serverRequestContextImpl) CanModifyUser(req *api.ModifyIdentityReques
 		log.Debugf("Checking if caller is authorized to change attributes to %+v", reqAttrs)
 		err := attr.CanRegisterRequestedAttributes(reqAttrs, userToModify, ctx.caller)
 		if err != nil {
-			return newAuthErr(ErrRegAttrAuth, "Failed to register attributes: %s", err)
+			return caerrors.NewAuthorizationErr(caerrors.ErrRegAttrAuth, "Failed to register attributes: %s", err)
 		}
 	}
 
@@ -430,7 +467,7 @@ func (ctx *serverRequestContextImpl) GetCaller() (spi.User, error) {
 	var err error
 	id := ctx.enrollmentID
 	if id == "" {
-		return nil, newAuthErr(ErrCallerIsNotAuthenticated, "Caller is not authenticated")
+		return nil, caerrors.NewAuthenticationErr(caerrors.ErrCallerIsNotAuthenticated, "Caller is not authenticated")
 	}
 	ca, err := ctx.GetCA()
 	if err != nil {
@@ -439,7 +476,7 @@ func (ctx *serverRequestContextImpl) GetCaller() (spi.User, error) {
 	// Get the user info object for this user
 	ctx.caller, err = ca.registry.GetUser(id, nil)
 	if err != nil {
-		return nil, newAuthErr(ErrGettingUser, "Failed to get user")
+		return nil, caerrors.NewAuthenticationErr(caerrors.ErrGettingUser, "Failed to get user")
 	}
 	return ctx.caller, nil
 }
@@ -448,10 +485,10 @@ func (ctx *serverRequestContextImpl) GetCaller() (spi.User, error) {
 func (ctx *serverRequestContextImpl) ContainsAffiliation(affiliation string) error {
 	validAffiliation, err := ctx.containsAffiliation(affiliation)
 	if err != nil {
-		return newHTTPErr(500, ErrGettingAffiliation, "Failed to validate if caller has authority to get ID: %s", err)
+		return caerrors.NewHTTPErr(500, caerrors.ErrGettingAffiliation, "Failed to validate if caller has authority to get ID: %s", err)
 	}
 	if !validAffiliation {
-		return newAuthErr(ErrCallerNotAffiliated, "Caller does not have authority to act on affiliation '%s'", affiliation)
+		return caerrors.NewAuthorizationErr(caerrors.ErrCallerNotAffiliated, "Caller does not have authority to act on affiliation '%s'", affiliation)
 	}
 	return nil
 }
@@ -491,7 +528,7 @@ func (ctx *serverRequestContextImpl) IsRegistrar() error {
 		return err
 	}
 	if !isRegistrar {
-		return newAuthErr(ErrMissingRegAttr, "Caller is not a registrar")
+		return caerrors.NewAuthorizationErr(caerrors.ErrMissingRegAttr, "Caller is not a registrar")
 	}
 
 	return nil
@@ -508,7 +545,7 @@ func (ctx *serverRequestContextImpl) isRegistrar() (string, bool, error) {
 
 	rolesStr, err := caller.GetAttribute("hf.Registrar.Roles")
 	if err != nil {
-		return "", false, newAuthErr(ErrRegAttrAuth, "'%s' is not a registrar", caller.GetName())
+		return "", false, caerrors.NewAuthorizationErr(caerrors.ErrRegAttrAuth, "'%s' is not a registrar", caller.GetName())
 	}
 
 	// Has some value for attribute 'hf.Registrar.Roles' then user is a registrar
@@ -523,10 +560,10 @@ func (ctx *serverRequestContextImpl) isRegistrar() (string, bool, error) {
 func (ctx *serverRequestContextImpl) CanActOnType(userType string) error {
 	canAct, err := ctx.canActOnType(userType)
 	if err != nil {
-		return newHTTPErr(500, ErrGettingType, "Failed to verify if user can act on type '%s': %s", userType, err)
+		return caerrors.NewHTTPErr(500, caerrors.ErrGettingType, "Failed to verify if user can act on type '%s': %s", userType, err)
 	}
 	if !canAct {
-		return newAuthErr(ErrCallerNotAffiliated, "Registrar does not have authority to act on type '%s'", userType)
+		return caerrors.NewAuthorizationErr(caerrors.ErrCallerNotAffiliated, "Registrar does not have authority to act on type '%s'", userType)
 	}
 	return nil
 }
@@ -544,7 +581,7 @@ func (ctx *serverRequestContextImpl) canActOnType(requestedType string) (bool, e
 		return false, err
 	}
 	if !isRegistrar {
-		return false, newAuthErr(ErrRegAttrAuth, "'%s' is not allowed to manage users", caller.GetName())
+		return false, caerrors.NewAuthorizationErr(caerrors.ErrRegAttrAuth, "'%s' is not allowed to manage users", caller.GetName())
 	}
 
 	if util.ListContains(typesStr, "*") {
@@ -575,7 +612,7 @@ func (ctx *serverRequestContextImpl) HasRole(role string) error {
 		return err
 	}
 	if !hasRole {
-		return newHTTPErr(400, ErrMissingRole, "Caller has a value of 'false' for attribute/role '%s'", role)
+		return caerrors.NewAuthorizationErr(caerrors.ErrMissingRole, "Caller has a value of 'false' for attribute/role '%s'", role)
 	}
 	return nil
 }
@@ -613,7 +650,7 @@ func (ctx *serverRequestContextImpl) hasRole(role string) (bool, error) {
 func (ctx *serverRequestContextImpl) GetVar(name string) (string, error) {
 	vars := gmux.Vars(ctx.req)
 	if vars == nil {
-		return "", newHTTPErr(500, ErrHTTPRequest, "Failed to correctly handle HTTP request")
+		return "", caerrors.NewHTTPErr(500, caerrors.ErrHTTPRequest, "Failed to correctly handle HTTP request")
 	}
 	value := vars[name]
 	return value, nil
@@ -628,7 +665,7 @@ func (ctx *serverRequestContextImpl) GetBoolQueryParm(name string) (bool, error)
 	if param != "" {
 		value, err = strconv.ParseBool(strings.ToLower(param))
 		if err != nil {
-			return false, newHTTPErr(400, ErrUpdateConfigRemoveAff, "Failed to correctly parse value of '%s' query parameter: %s", name, err)
+			return false, caerrors.NewHTTPErr(400, caerrors.ErrUpdateConfigRemoveAff, "Failed to correctly parse value of '%s' query parameter: %s", name, err)
 		}
 	}
 
@@ -651,7 +688,7 @@ func (ctx *serverRequestContextImpl) GetResp() http.ResponseWriter {
 }
 
 // GetCertificates executes the DB query to get back certificates based on the filters passed in
-func (ctx *serverRequestContextImpl) GetCertificates(req server.CertificateRequest, callerAff string) (*sqlx.Rows, error) {
+func (ctx *serverRequestContextImpl) GetCertificates(req cr.CertificateRequest, callerAff string) (*sqlx.Rows, error) {
 	return ctx.ca.certDBAccessor.GetCertificates(req, callerAff)
 }
 
@@ -665,7 +702,7 @@ func (ctx *serverRequestContextImpl) ChunksToDeliver(envVar string) (int, error)
 	} else {
 		chunkSize, err = strconv.Atoi(envVar)
 		if err != nil {
-			return 0, newHTTPErr(500, ErrParsingIntEnvVar, "Incorrect format specified for environment variable '%s', an integer value is required: %s", envVar, err)
+			return 0, caerrors.NewHTTPErr(500, caerrors.ErrParsingIntEnvVar, "Incorrect format specified for environment variable '%s', an integer value is required: %s", envVar, err)
 		}
 	}
 	return chunkSize, nil
@@ -678,6 +715,10 @@ func (ctx *serverRequestContextImpl) GetRegistry() spi.UserRegistry {
 
 func (ctx *serverRequestContextImpl) GetCAConfig() *CAConfig {
 	return ctx.ca.Config
+}
+
+func (ctx *serverRequestContextImpl) IsLDAPEnabled() bool {
+	return ctx.ca.Config.LDAP.Enabled
 }
 
 func convertAttrReqs(attrReqs []*api.AttributeRequest) []attrmgr.AttributeRequest {

@@ -149,7 +149,7 @@ func TestHandleIdemixEnrollForCredentialError(t *testing.T) {
 	}
 	rmo := idemix.RandModOrder(rnd)
 	idemixlib.On("GetRand").Return(rnd, nil)
-	idemixlib.On("RandModOrder", rnd).Return(rmo)
+	idemixlib.On("RandModOrder", rnd).Return(rmo, nil)
 
 	issuerCred := NewIssuerCredential(testPublicKeyFile, testSecretKeyFile, idemixlib)
 	issuer := new(mocks.MyIssuer)
@@ -160,7 +160,10 @@ func TestHandleIdemixEnrollForCredentialError(t *testing.T) {
 	ctx.On("GetIssuer").Return(issuer, nil)
 	ctx.On("IsBasicAuth").Return(true)
 	handler := EnrollRequestHandler{Ctx: ctx, IdmxLib: idemixlib, Issuer: issuer}
-	nonce := handler.GenerateNonce()
+	nonce, err := handler.GenerateNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate nonce: %s", err.Error())
+	}
 
 	credReq, _, err := newIdemixCredentialRequest(t, nonce)
 	if err != nil {
@@ -283,14 +286,14 @@ func TestHandleIdemixEnrollNewCredError(t *testing.T) {
 	caller := new(mocks.User)
 	caller.On("GetName").Return("foo")
 	caller.On("GetAffiliationPath").Return([]string{"a", "b", "c"})
-	caller.On("GetAttribute", "isAdmin").Return(&api.Attribute{Name: "isAdmin", Value: "true"}, nil)
+	caller.On("GetAttribute", "role").Return(&api.Attribute{Name: "role", Value: "2"}, nil)
 	caller.On("LoginComplete").Return(nil)
 
 	credReq, _, err := newIdemixCredentialRequest(t, nonce)
 	if err != nil {
 		t.Fatalf("Failed to create test credential request")
 	}
-	_, attrs, err := handler.GetAttributeValues(caller, ik.IPk, rh)
+	_, attrs, err := handler.GetAttributeValues(caller, ik.Ipk, rh)
 	if err != nil {
 		t.Fatalf("Failed to get attributes")
 	}
@@ -347,14 +350,14 @@ func TestHandleIdemixEnrollInsertCredError(t *testing.T) {
 	caller := new(mocks.User)
 	caller.On("GetName").Return("foo")
 	caller.On("GetAffiliationPath").Return([]string{"a", "b", "c"})
-	caller.On("GetAttribute", "isAdmin").Return(&api.Attribute{Name: "isAdmin", Value: "true"}, nil)
+	caller.On("GetAttribute", "role").Return(&api.Attribute{Name: "role", Value: "2"}, nil)
 	caller.On("LoginComplete").Return(nil)
 
 	credReq, _, err := newIdemixCredentialRequest(t, nonce)
 	if err != nil {
 		t.Fatalf("Failed to create test credential request")
 	}
-	_, attrs, err := handler.GetAttributeValues(caller, ik.IPk, rh)
+	_, attrs, err := handler.GetAttributeValues(caller, ik.Ipk, rh)
 	if err != nil {
 		t.Fatalf("Failed to get attributes")
 	}
@@ -427,14 +430,14 @@ func TestHandleIdemixEnrollForCredentialSuccess(t *testing.T) {
 	caller := new(mocks.User)
 	caller.On("GetName").Return("foo")
 	caller.On("GetAffiliationPath").Return([]string{"a", "b", "c"})
-	caller.On("GetAttribute", "isAdmin").Return(&api.Attribute{Name: "isAdmin", Value: "true"}, nil)
+	caller.On("GetAttribute", "role").Return(&api.Attribute{Name: "role", Value: "2"}, nil)
 	caller.On("LoginComplete").Return(nil)
 
 	credReq, _, err := newIdemixCredentialRequest(t, nonce)
 	if err != nil {
 		t.Fatalf("Failed to create test credential request")
 	}
-	_, attrs, err := handler.GetAttributeValues(caller, ik.IPk, rh)
+	_, attrs, err := handler.GetAttributeValues(caller, ik.Ipk, rh)
 	if err != nil {
 		t.Fatalf("Failed to get attributes")
 	}
@@ -482,7 +485,7 @@ func TestGetAttributeValues(t *testing.T) {
 	caller := new(mocks.User)
 	caller.On("GetName").Return("foo")
 	caller.On("GetAffiliationPath").Return([]string{"a", "b", "c"})
-	caller.On("GetAttribute", "isAdmin").Return(&api.Attribute{Name: "isAdmin", Value: "true"}, nil)
+	caller.On("GetAttribute", "role").Return(&api.Attribute{Name: "role", Value: "2"}, nil)
 	caller.On("GetAttribute", "type").Return(&api.Attribute{Name: "type", Value: "client"}, nil)
 	caller.On("LoginComplete").Return(nil)
 
@@ -543,5 +546,5 @@ func newIdemixCredentialRequest(t *testing.T, nonce *fp256bn.BIG) (*idemix.CredR
 		return nil, nil, err
 	}
 	sk := idemix.RandModOrder(rng)
-	return idemix.NewCredRequest(sk, nonce, ik.IPk, rng), sk, nil
+	return idemix.NewCredRequest(sk, idemix.BigToBytes(nonce), ik.Ipk, rng), sk, nil
 }

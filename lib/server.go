@@ -23,17 +23,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/cloudflare/cfssl/log"
 	"github.com/cloudflare/cfssl/revoke"
 	"github.com/cloudflare/cfssl/signer"
 	gmux "github.com/gorilla/mux"
 	"github.com/hyperledger/fabric-ca/lib/attr"
+	"github.com/hyperledger/fabric-ca/lib/caerrors"
+	calog "github.com/hyperledger/fabric-ca/lib/common/log"
 	"github.com/hyperledger/fabric-ca/lib/dbutil"
 	"github.com/hyperledger/fabric-ca/lib/metadata"
 	stls "github.com/hyperledger/fabric-ca/lib/tls"
 	"github.com/hyperledger/fabric-ca/util"
+	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 )
 
@@ -86,6 +87,10 @@ func (s *Server) Init(renew bool) (err error) {
 // init initializses the server leaving the DB open
 func (s *Server) init(renew bool) (err error) {
 	serverVersion := metadata.GetVersion()
+	err = calog.SetLogLevel(s.Config.LogLevel, s.Config.Debug)
+	if err != nil {
+		return err
+	}
 	log.Infof("Server Version: %s", serverVersion)
 	s.levels, err = metadata.GetLevels(serverVersion)
 	if err != nil {
@@ -232,11 +237,6 @@ func (s *Server) initConfig() (err error) {
 	if s.Config == nil {
 		s.Config = new(ServerConfig)
 	}
-	cfg := s.Config
-	// Set log level if debug is true
-	if cfg.Debug {
-		log.Level = log.LevelDebug
-	}
 	s.CA.server = s
 	s.CA.HomeDir = s.HomeDir
 	err = s.initMultiCAConfig()
@@ -246,6 +246,17 @@ func (s *Server) initConfig() (err error) {
 	revoke.SetCRLFetcher(s.fetchCRL)
 	// Make file names absolute
 	s.makeFileNamesAbsolute()
+
+	compModeStr := os.Getenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3")
+	if compModeStr == "" {
+		compModeStr = "true" // TODO: Change default to false once all clients have been updated to use the new authorization header
+	}
+
+	s.Config.CompMode1_3, err = strconv.ParseBool(compModeStr)
+	if err != nil {
+		return errors.WithMessage(err, "Invalid value for boolean environment variable 'FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3'")
+	}
+
 	return nil
 }
 
@@ -446,7 +457,7 @@ func (s *Server) GetCA(name string) (*CA, error) {
 	// Lookup the CA from the server
 	ca := s.caMap[name]
 	if ca == nil {
-		return nil, newHTTPErr(404, ErrCANotFound, "CA '%s' does not exist", name)
+		return nil, caerrors.NewHTTPErr(404, caerrors.ErrCANotFound, "CA '%s' does not exist", name)
 	}
 	return ca, nil
 }
@@ -457,13 +468,8 @@ func (s *Server) registerHandlers() {
 	s.registerHandler("cainfo", newCAInfoEndpoint(s))
 	s.registerHandler("register", newRegisterEndpoint(s))
 	s.registerHandler("enroll", newEnrollEndpoint(s))
-
-	// Disabling idemix routes for 1.2, they will be reenabled after 1.2 release is cut.
-	// IDEMIX_DISABLED BEGIN
-	// s.registerHandler("idemix/credential", newIdemixEnrollEndpoint(s))
-	// s.registerHandler("idemix/cri", newIdemixCRIEndpoint(s))
-	// IDEMIX_DISABLED END
-
+	s.registerHandler("idemix/credential", newIdemixEnrollEndpoint(s))
+	s.registerHandler("idemix/cri", newIdemixCRIEndpoint(s))
 	s.registerHandler("reenroll", newReenrollEndpoint(s))
 	s.registerHandler("revoke", newRevokeEndpoint(s))
 	s.registerHandler("tcert", newTCertEndpoint(s))
@@ -515,6 +521,7 @@ func (s *Server) listenAndServe() (err error) {
 			if !util.FileExists(c.TLS.CertFile) {
 				return fmt.Errorf("File specified by 'tls.certfile' does not exist: %s", c.TLS.CertFile)
 			}
+			log.Debugf("TLS Certificate: %s, TLS Key: %s", c.TLS.CertFile, c.TLS.KeyFile)
 		} else if !util.FileExists(c.TLS.CertFile) {
 			// TLS key file is not specified, generate TLS key and cert if they are not already generated
 			err = s.autoGenerateTLSCertificateKey()
@@ -522,7 +529,6 @@ func (s *Server) listenAndServe() (err error) {
 				return fmt.Errorf("Failed to automatically generate TLS certificate and key: %s", err)
 			}
 		}
-		log.Debugf("TLS Certificate: %s, TLS Key: %s", c.TLS.CertFile, c.TLS.KeyFile)
 
 		cer, err := util.LoadX509KeyPair(c.TLS.CertFile, c.TLS.KeyFile, s.csp)
 		if err != nil {
@@ -718,7 +724,7 @@ func (s *Server) loadDNFromCertFile(certFile string) (*DN, error) {
 }
 
 func (s *Server) autoGenerateTLSCertificateKey() error {
-	log.Debug("TLS enabled but no certificate or key provided, automatically generate TLS credentials")
+	log.Debug("TLS enabled but either certificate or key file does not exist, automatically generating TLS credentials")
 
 	clientCfg := &ClientConfig{
 		CSP: s.CA.Config.CSP,
@@ -753,7 +759,15 @@ func (s *Server) autoGenerateTLSCertificateKey() error {
 	}
 
 	// Write the TLS certificate to the file system
-	ioutil.WriteFile(s.Config.TLS.CertFile, cert, 0644)
+	err = ioutil.WriteFile(s.Config.TLS.CertFile, cert, 0644)
+	if err != nil {
+		return fmt.Errorf("Failed to write TLS certificate: %s", err)
+	}
+
+	// If c.TLS.Keyfile is specified then print out the key file path. If key file is not provided, then key generation is
+	// handled by BCCSP then only print out cert file path
+	c := s.Config
+	log.Debugf("Generated TLS Certificate: %s", c.TLS.CertFile)
 
 	return nil
 }

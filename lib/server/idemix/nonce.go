@@ -26,7 +26,7 @@ const (
 	// RemoveNonce is the query string for removing a specified nonce
 	RemoveNonce = "DELETE FROM nonces WHERE (val = ?)"
 	// RemoveExpiredNonces is the SQL string removing expired nonces
-	RemoveExpiredNonces = "DELETE FROM nonces WHERE (expiry < ?);"
+	RemoveExpiredNonces = "DELETE FROM nonces WHERE (expiry < ?)"
 	// DefaultNonceExpiration is the default value for nonce expiration
 	DefaultNonceExpiration = "15s"
 	// DefaultNonceSweepInterval is the default value for nonce sweep interval
@@ -91,9 +91,12 @@ func NewNonceManager(issuer MyIssuer, clock Clock, level int) (NonceManager, err
 // GetNonce returns a new nonce
 func (nm *nonceManager) GetNonce() (*fp256bn.BIG, error) {
 	idmixLib := nm.issuer.IdemixLib()
-	nonce := idmixLib.RandModOrder(nm.issuer.IdemixRand())
+	nonce, err := idmixLib.RandModOrder(nm.issuer.IdemixRand())
+	if err != nil {
+		return nil, err
+	}
 	nonceBytes := idemix.BigToBytes(nonce)
-	err := nm.insertNonceInDB(&Nonce{
+	err = nm.insertNonceInDB(&Nonce{
 		Val:    util.B64Encode(nonceBytes),
 		Expiry: nm.clock.Now().UTC().Add(nm.nonceExpiration),
 		Level:  nm.level,
@@ -159,7 +162,7 @@ func (nm *nonceManager) getNonceFromDB(tx dbutil.FabricCATx, args ...interface{}
 	if len(nonces) == 0 {
 		return nil, errors.New("Nonce not found in the datastore")
 	}
-	result, err := tx.Exec(RemoveNonce, args...)
+	result, err := tx.Exec(tx.Rebind(RemoveNonce), args...)
 	if err != nil {
 		log.Errorf("Failed to remove nonce %s from DB: %s", args[0], err.Error())
 		return nonces[0], nil
@@ -172,7 +175,7 @@ func (nm *nonceManager) getNonceFromDB(tx dbutil.FabricCATx, args ...interface{}
 }
 
 func (nm *nonceManager) removeExpiredNoncesFromDB(curTime time.Time) error {
-	_, err := nm.issuer.DB().NamedExec(RemoveExpiredNonces, curTime)
+	_, err := nm.issuer.DB().Exec(nm.issuer.DB().Rebind(RemoveExpiredNonces), curTime)
 	if err != nil {
 		log.Errorf("Failed to remove expired nonces from DB for CA '%s': %s", nm.issuer.Name(), err.Error())
 		return errors.New("Failed to remove expired nonces from DB")

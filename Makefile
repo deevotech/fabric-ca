@@ -29,8 +29,8 @@
 #   - clean-all - cleans the build area and release packages
 
 PROJECT_NAME = fabric-ca
-BASE_VERSION = 1.2.1
-PREV_VERSION = 1.2.0
+BASE_VERSION = 1.4.1
+PREV_VERSION = 1.4.0
 IS_RELEASE = false
 
 ARCH=$(shell go env GOARCH)
@@ -40,19 +40,19 @@ STABLE_TAG ?= $(ARCH)-$(BASE_VERSION)-stable
 ifneq ($(IS_RELEASE),true)
 EXTRA_VERSION ?= snapshot-$(shell git rev-parse --short HEAD)
 PROJECT_VERSION=$(BASE_VERSION)-$(EXTRA_VERSION)
-FABRIC_TAG ?= $(ARCH)-$(PREV_VERSION)
+FABRIC_TAG ?= latest
 else
 PROJECT_VERSION=$(BASE_VERSION)
 FABRIC_TAG ?= $(ARCH)-$(BASE_VERSION)
 endif
 
 ifeq ($(ARCH),s390x)
-PGVER=9.4
+PGVER=9.6
 else
 PGVER=9.5
 endif
 
-BASEIMAGE_RELEASE = 0.4.10
+BASEIMAGE_RELEASE = 0.4.14
 PKGNAME = github.com/hyperledger/$(PROJECT_NAME)
 
 METADATA_VAR = Version=$(PROJECT_VERSION)
@@ -61,7 +61,7 @@ GO_SOURCE := $(shell find . -name '*.go')
 GO_LDFLAGS = $(patsubst %,-X $(PKGNAME)/lib/metadata.%,$(METADATA_VAR))
 export GO_LDFLAGS
 
-IMAGES = $(PROJECT_NAME) $(PROJECT_NAME)-orderer $(PROJECT_NAME)-peer $(PROJECT_NAME)-tools
+IMAGES = $(PROJECT_NAME)
 FVTIMAGE = $(PROJECT_NAME)-fvt
 
 RELEASE_PLATFORMS = linux-amd64 darwin-amd64 linux-ppc64le linux-s390x windows-amd64
@@ -79,7 +79,9 @@ rename: .FORCE
 
 docker: $(patsubst %,build/image/%/$(DUMMY), $(IMAGES))
 
-docker-fabric-ca: build/image/fabric-ca/$(DUMMY)
+docker-all: docker
+
+docker-fabric-ca: docker
 
 docker-fvt: $(patsubst %,build/image/%/$(DUMMY), $(FVTIMAGE))
 
@@ -133,7 +135,7 @@ build/image/%/$(DUMMY): Makefile build/image/%/payload
 	@cat images/$(TARGET)/Dockerfile.in \
 		| sed -e 's|_BASE_NS_|$(BASE_DOCKER_NS)|g' \
 		| sed -e 's|_NS_|$(DOCKER_NS)|g' \
-		| sed -e 's|_NEXUS_REPO_|$(NEXUS_DOCKER)|g' \
+		| sed -e 's|_NEXUS_REPO_|$(NEXUS_URL)|g' \
 		| sed -e 's|_BASE_TAG_|$(BASE_DOCKER_TAG)|g' \
 		| sed -e 's|_FABRIC_TAG_|$(FABRIC_TAG)|g' \
 		| sed -e 's|_STABLE_TAG_|$(STABLE_TAG)|g' \
@@ -152,12 +154,6 @@ build/image/fabric-ca-fvt/payload: \
 	build/docker/bin/fabric-ca-client \
 	build/docker/bin/fabric-ca-server \
 	build/fabric-ca-fvt.tar.bz2
-build/image/fabric-ca-orderer/payload: \
-	build/docker/bin/fabric-ca-client
-build/image/fabric-ca-peer/payload: \
-	build/docker/bin/fabric-ca-client
-build/image/fabric-ca-tools/payload: \
-	build/docker/bin/fabric-ca-client
 build/image/%/payload:
 	@echo "Copying $^ to $@"
 	mkdir -p $@
@@ -177,6 +173,8 @@ all-tests: checks fabric-ca-server fabric-ca-client
 
 unit-tests: checks fabric-ca-server fabric-ca-client
 	@scripts/run_unit_tests
+
+unit-test: unit-tests
 
 int-tests: checks fabric-ca-server fabric-ca-client
 	@scripts/run_integration_tests
@@ -220,13 +218,13 @@ load-test: docker-clean docker-fvt
 fvt-tests:
 	@scripts/run_fvt_tests
 
-ci-tests: docker-clean docker-fvt all-tests docs
+ci-tests: docker-clean all-tests docker-fvt docs
 	@docker run -v $(shell pwd):/opt/gopath/src/github.com/hyperledger/fabric-ca ${DOCKER_NS}/fabric-ca-fvt
 
 %-docker-clean:
 	$(eval TARGET = ${patsubst %-docker-clean,%,${@}})
 	-docker images -q $(DOCKER_NS)/$(TARGET):latest | xargs -I '{}' docker rmi -f '{}'
-	-docker images -q $(NEXUS_DOCKER)/*:$(STABLE_TAG) | xargs -I '{}' docker rmi -f '{}'
+	-docker images -q $(NEXUS_URL)/*:$(STABLE_TAG) | xargs -I '{}' docker rmi -f '{}'
 	-@rm -rf build/image/$(TARGET) ||:
 
 docker-clean: $(patsubst %,%-docker-clean, $(IMAGES) $(PROJECT_NAME)-fvt)

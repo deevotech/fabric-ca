@@ -477,7 +477,7 @@ func TestGetNewRevocationHandleLastHandle(t *testing.T) {
 	tx.On("Rollback").Return(nil)
 	tx.On("Rebind", SelectRAInfo).Return(SelectRAInfo)
 	tx.On("Rebind", UpdateNextAndLastHandle).Return(UpdateNextAndLastHandle)
-	tx.On("Exec", UpdateNextAndLastHandle, 101, 200, 2).Return(nil, nil)
+	tx.On("Exec", UpdateNextAndLastHandle, 101, 200, 2, 1).Return(nil, nil)
 	rcInfos := []RevocationAuthorityInfo{}
 	f1 := getTxSelectFunc(t, &rcInfos, 100, false, true)
 	tx.On("Select", &rcInfos, SelectRAInfo).Return(f1)
@@ -703,10 +703,6 @@ func getRevocationAuthority(t *testing.T, homeDir string, db *dmocks.FabricCADB,
 		validHandles = append(validHandles, fp256bn.NewBIGint(i))
 	}
 	alg := idemix.ALG_NO_REVOCATION
-	if revokedCred > 0 {
-		validHandles = append(validHandles[:revokedCred], validHandles[revokedCred+1:]...)
-		alg = idemix.ALG_PLAIN_SIGNATURE
-	}
 	if idemixCreateCRIError {
 		lib.On("CreateCRI", revocationKey, validHandles, 1, alg, rnd).Return(nil, errors.New("Idemix lib create CRI error"))
 	} else {

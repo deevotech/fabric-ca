@@ -22,12 +22,11 @@ import (
 	"io/ioutil"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/cloudflare/cfssl/log"
 	"github.com/hyperledger/fabric-ca/util"
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/bccsp/factory"
+	"github.com/pkg/errors"
 )
 
 // DefaultCipherSuites is a set of strong TLS cipher suites
@@ -96,7 +95,7 @@ func GetClientTLSConfig(cfg *ClientTLSConfig, csp bccsp.BCCSP) (*tls.Config, err
 	}
 	rootCAPool := x509.NewCertPool()
 	if len(cfg.CertFiles) == 0 {
-		return nil, errors.New("No TLS certificate files were provided")
+		return nil, errors.New("No trusted root certificates for TLS were provided")
 	}
 
 	for _, cacert := range cfg.CertFiles {

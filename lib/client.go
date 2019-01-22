@@ -20,13 +20,11 @@ import (
 	"strconv"
 	"strings"
 
-	proto "github.com/golang/protobuf/proto"
-	fp256bn "github.com/hyperledger/fabric-amcl/amcl/FP256BN"
-	"github.com/pkg/errors"
-
 	cfsslapi "github.com/cloudflare/cfssl/api"
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/log"
+	proto "github.com/golang/protobuf/proto"
+	fp256bn "github.com/hyperledger/fabric-amcl/amcl/FP256BN"
 	"github.com/hyperledger/fabric-ca/api"
 	"github.com/hyperledger/fabric-ca/lib/client/credential"
 	idemixcred "github.com/hyperledger/fabric-ca/lib/client/credential/idemix"
@@ -38,6 +36,7 @@ import (
 	"github.com/hyperledger/fabric/bccsp"
 	"github.com/hyperledger/fabric/idemix"
 	"github.com/mitchellh/mapstructure"
+	"github.com/pkg/errors"
 )
 
 // Client is the fabric-ca client object
@@ -54,6 +53,8 @@ type Client struct {
 	csp bccsp.BCCSP
 	// HTTP client associated with this Fabric CA client
 	httpClient *http.Client
+	// Public key of Idemix issuer
+	issuerPublicKey *idemix.IssuerPublicKey
 }
 
 // GetCAInfoResponse is the response from the GetCAInfo call
@@ -202,7 +203,7 @@ func (c *Client) GenCSR(req *api.CSRInfo, id string) ([]byte, bccsp.Key, error) 
 	cr := c.newCertificateRequest(req)
 	cr.CN = id
 
-	if cr.KeyRequest == nil {
+	if (cr.KeyRequest == nil) || (cr.KeyRequest.Size() == 0 && cr.KeyRequest.Algo() == "") {
 		cr.KeyRequest = newCfsslBasicKeyRequest(api.NewBasicKeyRequest())
 	}
 
@@ -243,20 +244,20 @@ func (c *Client) net2LocalCAInfo(net *common.CAInfoResponseNet, local *GetCAInfo
 	if err != nil {
 		return errors.WithMessage(err, "Failed to decode CA chain")
 	}
-	// if net.IssuerPublicKey != "" {
-	// 	ipk, err := util.B64Decode(net.IssuerPublicKey)
-	// 	if err != nil {
-	// 		return errors.WithMessage(err, "Failed to decode issuer public key")
-	// 	}
-	// 	local.IssuerPublicKey = ipk
-	// }
-	// if net.IssuerRevocationPublicKey != "" {
-	// 	rpk, err := util.B64Decode(net.IssuerRevocationPublicKey)
-	// 	if err != nil {
-	// 		return errors.WithMessage(err, "Failed to decode issuer revocation key")
-	// 	}
-	// 	local.IssuerRevocationPublicKey = rpk
-	// }
+	if net.IssuerPublicKey != "" {
+		ipk, err := util.B64Decode(net.IssuerPublicKey)
+		if err != nil {
+			return errors.WithMessage(err, "Failed to decode issuer public key")
+		}
+		local.IssuerPublicKey = ipk
+	}
+	if net.IssuerRevocationPublicKey != "" {
+		rpk, err := util.B64Decode(net.IssuerRevocationPublicKey)
+		if err != nil {
+			return errors.WithMessage(err, "Failed to decode issuer revocation key")
+		}
+		local.IssuerRevocationPublicKey = rpk
+	}
 	local.CAName = net.CAName
 	local.CAChain = caChain
 	local.Version = net.Version
@@ -347,10 +348,10 @@ func (c *Client) handleIdemixEnroll(req *api.EnrollmentRequest) (*EnrollmentResp
 	log.Infof("Successfully got nonce from CA %s", req.CAName)
 
 	ipkBytes := []byte{}
-	// ipkBytes, err := util.B64Decode(result.CAInfo.IssuerPublicKey)
-	// if err != nil {
-	// 	return nil, errors.WithMessage(err, fmt.Sprintf("Failed to decode issuer public key that was returned by CA %s", req.CAName))
-	// }
+	ipkBytes, err = util.B64Decode(result.CAInfo.IssuerPublicKey)
+	if err != nil {
+		return nil, errors.WithMessage(err, fmt.Sprintf("Failed to decode issuer public key that was returned by CA %s", req.CAName))
+	}
 	// Create credential request
 	credReq, sk, err := c.newIdemixCredentialRequest(nonce, ipkBytes)
 	if err != nil {
@@ -456,13 +457,15 @@ func (c *Client) newIdemixEnrollmentResponse(identity *Identity, result *common.
 
 	// Create SignerConfig object with credential bytes from the response
 	// and secret key
-	isAdmin, _ := strconv.ParseBool(result.Attrs["Role"])
+	role, _ := result.Attrs["Role"].(int)
+	ou, _ := result.Attrs["OU"].(string)
+	enrollmentID, _ := result.Attrs["EnrollmentID"].(string)
 	signerConfig := &idemixcred.SignerConfig{
-		Cred:    credBytes,
-		Sk:      idemix.BigToBytes(sk),
-		IsAdmin: isAdmin,
-		OrganizationalUnitIdentifier:    result.Attrs["OU"],
-		EnrollmentID:                    result.Attrs["EnrollmentID"],
+		Cred:                            credBytes,
+		Sk:                              idemix.BigToBytes(sk),
+		Role:                            role,
+		OrganizationalUnitIdentifier:    ou,
+		EnrollmentID:                    enrollmentID,
 		CredentialRevocationInformation: criBytes,
 	}
 
@@ -529,7 +532,7 @@ func (c *Client) newIdemixCredentialRequest(nonce *fp256bn.BIG, ipkBytes []byte)
 	if err != nil {
 		return nil, nil, err
 	}
-	return idemix.NewCredRequest(sk, nonce, issuerPubKey, rng), sk, nil
+	return idemix.NewCredRequest(sk, idemix.BigToBytes(nonce), issuerPubKey, rng), sk, nil
 }
 
 func (c *Client) getIssuerPubKey(ipkBytes []byte) (*idemix.IssuerPublicKey, error) {
@@ -545,7 +548,8 @@ func (c *Client) getIssuerPubKey(ipkBytes []byte) (*idemix.IssuerPublicKey, erro
 	if err != nil {
 		return nil, err
 	}
-	return pubKey, nil
+	c.issuerPublicKey = pubKey
+	return c.issuerPublicKey, nil
 }
 
 // LoadMyIdentity loads the client's identity from disk
@@ -650,7 +654,10 @@ func (c *Client) GetCSP() bccsp.BCCSP {
 
 // GetIssuerPubKey returns issuer public key associated with this client
 func (c *Client) GetIssuerPubKey() (*idemix.IssuerPublicKey, error) {
-	return c.getIssuerPubKey(nil)
+	if c.issuerPublicKey == nil {
+		return c.getIssuerPubKey(nil)
+	}
+	return c.issuerPublicKey, nil
 }
 
 // newGet create a new GET request
@@ -852,6 +859,8 @@ func (c *Client) checkX509Enrollment() error {
 // Idemix credential does not exist and if they exist and credential verification
 // fails. Returns nil if the credential verification suucceeds
 func (c *Client) checkIdemixEnrollment() error {
+	log.Debugf("CheckIdemixEnrollment - ipkFile: %s, idemixCredFrile: %s", c.ipkFile, c.idemixCredFile)
+
 	idemixIssuerPubKeyExists := util.FileExists(c.ipkFile)
 	idemixCredExists := util.FileExists(c.idemixCredFile)
 	if idemixIssuerPubKeyExists && idemixCredExists {

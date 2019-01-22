@@ -18,16 +18,22 @@ package util
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/big"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"math/big"
 
 	"github.com/hyperledger/fabric/bccsp/factory"
 	_ "github.com/mattn/go-sqlite3"
@@ -60,44 +66,45 @@ func TestECCreateToken(t *testing.T) {
 	}
 	body := []byte("request byte array")
 
-	ECtoken, err := CreateToken(bccsp, cert, privKey, body)
+	ECtoken, err := CreateToken(bccsp, cert, privKey, "GET", "/enroll", body)
 	if err != nil {
 		t.Fatalf("CreatToken failed: %s", err)
 	}
 
-	_, err = VerifyToken(bccsp, ECtoken, body)
+	os.Setenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3", "false") // Test new token
+	_, err = VerifyToken(bccsp, ECtoken, "GET", "/enroll", body, false)
 	if err != nil {
 		t.Fatalf("VerifyToken failed: %s", err)
 	}
 
-	_, err = VerifyToken(nil, ECtoken, body)
+	_, err = VerifyToken(nil, ECtoken, "GET", "/enroll", body, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as no instance of csp is passed")
 	}
 
-	_, err = VerifyToken(bccsp, "", body)
+	_, err = VerifyToken(bccsp, "", "GET", "/enroll", body, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as no EC Token is passed")
 	}
 
-	_, err = VerifyToken(bccsp, ECtoken, nil)
+	_, err = VerifyToken(bccsp, ECtoken, "GET", "/enroll", nil, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as no body is passed")
 	}
 
-	_, err = VerifyToken(bccsp, ECtoken, nil)
+	_, err = VerifyToken(bccsp, ECtoken, "POST", "/enroll", nil, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as method was tampered")
 	}
 
-	_, err = VerifyToken(bccsp, ECtoken, nil)
+	_, err = VerifyToken(bccsp, ECtoken, "GET", "/affiliations", nil, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as path was tampered")
 	}
 
 	verifiedByte := []byte("TEST")
 	body = append(body, verifiedByte[0])
-	_, err = VerifyToken(bccsp, ECtoken, body)
+	_, err = VerifyToken(bccsp, ECtoken, "GET", "/enroll", body, false)
 	if err == nil {
 		t.Fatal("VerifyToken should have failed as body was tampered")
 	}
@@ -106,12 +113,43 @@ func TestECCreateToken(t *testing.T) {
 	if skierror != nil {
 		t.Fatalf("SKI File Read failed with error : %s", skierror)
 	}
-	ECtoken, err = CreateToken(bccsp, ski, privKey, body)
+	ECtoken, err = CreateToken(bccsp, ski, privKey, "GET", "/enroll", body)
 	if (err == nil) || (ECtoken != "") {
 		t.Fatal("CreatToken should have failed as certificate passed is not correct")
 	}
+
+	// With comptability mode disabled, using old token should fail
+	b64Cert := B64Encode(cert)
+	payload := B64Encode(body) + "." + b64Cert
+	oldToken, err := genECDSAToken(bccsp, privKey, b64Cert, payload)
+	FatalError(t, err, "Failed to create token")
+	_, err = VerifyToken(bccsp, oldToken, "GET", "/enroll", body, false)
+	assert.Error(t, err)
+
+	// Test that by default with no environment variable set, the old token is considered valid
+	os.Unsetenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3")
+	_, err = VerifyToken(bccsp, oldToken, "GET", "/enroll", body, true)
+	assert.NoError(t, err, "Failed to verify token using old token type")
 }
 
+func TestDecodeToken(t *testing.T) {
+	token := "x.y.z"
+	_, _, _, err := DecodeToken(token)
+	assert.Error(t, err, "Decode should fail if the token has more than two parts")
+
+	token = "x"
+	_, _, _, err = DecodeToken(token)
+	assert.Error(t, err, "Decode should fail if the token has less than two parts")
+
+	token = "x.y"
+	_, _, _, err = DecodeToken(token)
+	assert.Error(t, err, "Decode should fail if the 1st part of the token is not in base64 encoded format")
+
+	fakecert := B64Encode([]byte("hello"))
+	token = fakecert + ".y"
+	_, _, _, err = DecodeToken(token)
+	assert.Error(t, err, "Decode should fail if the 1st part of the token is not base64 bytes of a X509 cert")
+}
 func TestGetX509CertFromPem(t *testing.T) {
 
 	certBuffer, error := ioutil.ReadFile(getPath("ec.pem"))
@@ -190,7 +228,7 @@ func TestCreateTokenDiffKey(t *testing.T) {
 	bccsp := GetDefaultBCCSP()
 	privKey, _ := ImportBCCSPKeyFromPEM(getPath("rsa-key.pem"), bccsp, true)
 	body := []byte("request byte array")
-	_, err := CreateToken(bccsp, cert, privKey, body)
+	_, err := CreateToken(bccsp, cert, privKey, "POST", "/enroll", body)
 	if err == nil {
 		t.Fatalf("TestCreateTokenDiffKey passed but should have failed")
 	}
@@ -217,7 +255,7 @@ func TestEmptyToken(t *testing.T) {
 	body := []byte("request byte array")
 
 	csp := factory.GetDefault()
-	_, err := VerifyToken(csp, "", body)
+	_, err := VerifyToken(csp, "", "POST", "/enroll", body, true)
 	if err == nil {
 		t.Fatalf("TestEmptyToken passed but should have failed")
 	}
@@ -228,7 +266,7 @@ func TestEmptyCert(t *testing.T) {
 	body := []byte("request byte array")
 
 	csp := factory.GetDefault()
-	_, err := CreateToken(csp, cert, nil, body)
+	_, err := CreateToken(csp, cert, nil, "POST", "/enroll", body)
 	if err == nil {
 		t.Fatalf("TestEmptyCert passed but should have failed")
 	}
@@ -238,7 +276,7 @@ func TestEmptyKey(t *testing.T) {
 	bccsp := GetDefaultBCCSP()
 	privKey, _ := ImportBCCSPKeyFromPEM(getPath("ec-key.pem"), bccsp, true)
 	body := []byte("request byte array")
-	_, err := CreateToken(bccsp, []byte(""), privKey, body)
+	_, err := CreateToken(bccsp, []byte(""), privKey, "POST", "/enroll", body)
 	if err == nil {
 		t.Fatalf("TestEmptyKey passed but should have failed")
 	}
@@ -248,7 +286,7 @@ func TestEmptyBody(t *testing.T) {
 	bccsp := GetDefaultBCCSP()
 	privKey, _ := ImportBCCSPKeyFromPEM(getPath("ec-key.pem"), bccsp, true)
 	cert, _ := ioutil.ReadFile(getPath("ec.pem"))
-	_, err := CreateToken(bccsp, cert, privKey, []byte(""))
+	_, err := CreateToken(bccsp, cert, privKey, "POST", "/enroll", []byte(""))
 	if err != nil {
 		t.Fatalf("CreateToken failed: %s", err)
 	}
@@ -376,12 +414,21 @@ func TestReadFile(t *testing.T) {
 }
 
 func TestWriteFile(t *testing.T) {
-	testData := []byte("foo")
-	err := WriteFile("../testdata/test.txt", testData, 0777)
+	testdir, err := ioutil.TempDir(".", "writefiletest")
 	if err != nil {
-		t.Error("Failed to write file, error: ", err)
+		t.Fatalf("Failed to create temp directory: %s", err.Error())
 	}
-	os.Remove("../testdata/test.txt")
+	defer os.RemoveAll(testdir)
+	testData := []byte("foo")
+	err = WriteFile(path.Join(testdir, "test.txt"), testData, 0777)
+	assert.NoError(t, err)
+	readOnlyDir := path.Join(testdir, "readonlydir")
+	err = os.MkdirAll(readOnlyDir, 4444)
+	if err != nil {
+		t.Fatalf("Failed to create directory: %s", err.Error())
+	}
+	err = WriteFile(path.Join(readOnlyDir, "test/test.txt"), testData, 0777)
+	assert.Error(t, err, "Should fail to create 'test' directory as the parent directory is read only")
 }
 
 func getPath(file string) string {
@@ -600,6 +647,25 @@ func TestGetSerialAsHex(t *testing.T) {
 func TestECPrivateKey(t *testing.T) {
 	_, err := GetECPrivateKey(getPEM("../testdata/ec-key.pem", t))
 	assert.NoError(t, err)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 256)
+	if err != nil {
+		t.Fatalf("Failed to create rsa key: %s", err.Error())
+	}
+	encodedPK, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		t.Fatalf("Failed to marshal RSA private key: %s", err.Error())
+	}
+
+	pemEncodedPK := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedPK})
+	_, err = GetECPrivateKey(pemEncodedPK)
+	assert.Error(t, err)
+
+	_, err = GetECPrivateKey([]byte("hello"))
+	assert.Error(t, err)
+
+	_, err = GetECPrivateKey(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("hello")}))
+	assert.Error(t, err)
 }
 
 func TestPKCS8WrappedECPrivateKey(t *testing.T) {
@@ -608,8 +674,40 @@ func TestPKCS8WrappedECPrivateKey(t *testing.T) {
 }
 
 func TestRSAPrivateKey(t *testing.T) {
-	_, err := GetRSAPrivateKey(getPEM("../testdata/rsa-key.pem", t))
+	_, err := GetRSAPrivateKey([]byte("hello"))
+	assert.Error(t, err)
+
+	_, err = GetRSAPrivateKey(getPEM("../testdata/rsa-key.pem", t))
 	assert.NoError(t, err)
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 256)
+	if err != nil {
+		t.Fatalf("Failed to create rsa key: %s", err.Error())
+	}
+	encodedPK, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		t.Fatalf("Failed to marshal RSA private key: %s", err.Error())
+	}
+
+	pemEncodedPK := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedPK})
+	_, err = GetRSAPrivateKey(pemEncodedPK)
+	assert.NoError(t, err)
+
+	_, err = GetRSAPrivateKey(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("hello")}))
+	assert.Error(t, err)
+
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to create rsa key: %s", err.Error())
+	}
+	encodedPK, err = x509.MarshalPKCS8PrivateKey(ecdsaKey)
+	if err != nil {
+		t.Fatalf("Failed to marshal RSA private key: %s", err.Error())
+	}
+
+	pemEncodedPK = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedPK})
+	_, err = GetRSAPrivateKey(pemEncodedPK)
+	assert.Error(t, err)
 }
 
 func TestCheckHostsInCert(t *testing.T) {

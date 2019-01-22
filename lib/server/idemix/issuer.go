@@ -36,7 +36,7 @@ type Issuer interface {
 	RevocationPublicKey() ([]byte, error)
 	IssueCredential(ctx ServerRequestCtx) (*EnrollmentResponse, error)
 	GetCRI(ctx ServerRequestCtx) (*api.GetCRIResponse, error)
-	VerifyToken(authHdr string, body []byte) (string, error)
+	VerifyToken(authHdr, method, uri string, body []byte) (string, error)
 }
 
 // MyIssuer provides functions for accessing issuer components
@@ -115,12 +115,12 @@ func (i *issuer) Init(renew bool, db dbutil.FabricCADB, levels *dbutil.Levels) e
 		return err
 	}
 	i.credDBAccessor = NewCredentialAccessor(i.db, levels.Credential)
-	//log.Debugf("Intializing revocation authority for issuer '%s'", i.Name())
+	log.Debugf("Intializing revocation authority for issuer '%s'", i.Name())
 	i.rc, err = NewRevocationAuthority(i, levels.RAInfo)
 	if err != nil {
 		return err
 	}
-	//log.Debugf("Intializing nonce manager for issuer '%s'", i.Name())
+	log.Debugf("Intializing nonce manager for issuer '%s'", i.Name())
 	i.nm, err = NewNonceManager(i, &wallClock{}, levels.Nonce)
 	if err != nil {
 		return err
@@ -137,7 +137,7 @@ func (i *issuer) IssuerPublicKey() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ipkBytes, err := proto.Marshal(ik.IPk)
+	ipkBytes, err := proto.Marshal(ik.Ipk)
 	if err != nil {
 		return nil, err
 	}
@@ -182,12 +182,12 @@ func (i *issuer) GetCRI(ctx ServerRequestCtx) (*api.GetCRIResponse, error) {
 	return handler.HandleRequest()
 }
 
-func (i *issuer) VerifyToken(authHdr string, body []byte) (string, error) {
+func (i *issuer) VerifyToken(authHdr, method, uri string, body []byte) (string, error) {
 	if !i.isInitialized {
 		return "", errors.New("Issuer is not initialized")
 	}
 	// Disclosure array indicates which attributes are disclosed. 1 means disclosed. Currently four attributes are
-	// supported: OU, isAdmin, enrollmentID and revocationHandle. Third element of disclosure array is set to 1
+	// supported: OU, role, enrollmentID and revocationHandle. Third element of disclosure array is set to 1
 	// to indicate that the server expects enrollmentID to be disclosed in the signature sent in the authorization token.
 	// EnrollmentID is disclosed to check if the signature was infact created using credential of a user whose
 	// enrollment ID is the one specified in the token. So, enrollment ID in the token is used to check if the user
@@ -210,7 +210,9 @@ func (i *issuer) VerifyToken(authHdr string, body []byte) (string, error) {
 	}
 	idBytes := []byte(enrollmentID)
 	attrs := []*fp256bn.BIG{nil, nil, idemix.HashModOrder(idBytes), nil}
-	msg := util.B64Encode(body)
+	b64body := util.B64Encode(body)
+	b64uri := util.B64Encode([]byte(uri))
+	msg := method + "." + b64uri + "." + b64body
 	digest, digestError := i.csp.Hash([]byte(msg), &bccsp.SHAOpts{})
 	if digestError != nil {
 		return "", errors.WithMessage(digestError, fmt.Sprintf("Failed to create authentication token '%s'", msg))
@@ -235,7 +237,7 @@ func (i *issuer) VerifyToken(authHdr string, body []byte) (string, error) {
 	if err != nil {
 		return "", errors.WithMessage(err, "Failed to unmarshal signature bytes specified in the token")
 	}
-	err = sig.Ver(disclosure, issuerKey.IPk, digest, attrs, 3, ra.PublicKey(), epoch)
+	err = sig.Ver(disclosure, issuerKey.Ipk, digest, attrs, 3, ra.PublicKey(), epoch)
 	if err != nil {
 		return "", errors.WithMessage(err, "Failed to verify the token")
 	}
@@ -312,9 +314,9 @@ func (i *issuer) initKeyMaterial(renew bool) error {
 		privKeyFileExists := util.FileExists(idemixSecretKey)
 		// If they both exist, the CA was already initialized, load the keys from the disk
 		if pubKeyFileExists && privKeyFileExists {
-			// log.Info("The Idemix issuer public and secret key files already exist")
-			// log.Infof("   secret key file location: %s", idemixSecretKey)
-			// log.Infof("   public key file location: %s", idemixPubKey)
+			log.Info("The Idemix issuer public and secret key files already exist")
+			log.Infof("   secret key file location: %s", idemixSecretKey)
+			log.Infof("   public key file location: %s", idemixPubKey)
 			err := issuerCred.Load()
 			if err != nil {
 				return err

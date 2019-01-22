@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2017 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package lib
@@ -24,6 +14,7 @@ import (
 	"github.com/cloudflare/cfssl/log"
 	"github.com/hyperledger/fabric-ca/api"
 	"github.com/hyperledger/fabric-ca/lib/attr"
+	"github.com/hyperledger/fabric-ca/lib/caerrors"
 	"github.com/hyperledger/fabric-ca/lib/spi"
 	"github.com/pkg/errors"
 )
@@ -172,7 +163,7 @@ func getAffiliations(ctx *serverRequestContextImpl, caller spi.User, caname stri
 	callerAff := GetUserAffiliation(caller)
 	rows, err := registry.GetAllAffiliations(callerAff)
 	if err != nil {
-		return nil, newHTTPErr(500, ErrGettingUser, "Failed to get affiliation: %s", err)
+		return nil, caerrors.NewHTTPErr(500, caerrors.ErrGettingUser, "Failed to get affiliation: %s", err)
 	}
 
 	an := &affiliationNode{}
@@ -180,12 +171,15 @@ func getAffiliations(ctx *serverRequestContextImpl, caller spi.User, caname stri
 		var aff AffiliationRecord
 		err := rows.StructScan(&aff)
 		if err != nil {
-			return nil, newHTTPErr(500, ErrGettingAffiliation, "Failed to get read row: %s", err)
+			return nil, caerrors.NewHTTPErr(500, caerrors.ErrGettingAffiliation, "Failed to get read row: %s", err)
 		}
 
 		an.insertByName(aff.Name)
 	}
 	root := an.GetRoot()
+	if root == nil {
+		return nil, caerrors.NewHTTPErr(500, caerrors.ErrGettingAffiliation, "No affiliations are configured on the CA")
+	}
 
 	resp := &api.AffiliationResponse{
 		CAName: caname,
@@ -208,7 +202,7 @@ func getAffiliation(ctx *serverRequestContextImpl, caller spi.User, requestedAff
 
 	result, err := registry.GetAffiliationTree(requestedAffiliation)
 	if err != nil {
-		return nil, newHTTPErr(500, ErrGettingAffiliation, "Failed to get affiliation: %s", err)
+		return nil, caerrors.NewHTTPErr(500, caerrors.ErrGettingAffiliation, "Failed to get affiliation: %s", err)
 	}
 
 	resp, err := getResponse(result, caname)
@@ -223,7 +217,7 @@ func processAffiliationDeleteRequest(ctx *serverRequestContextImpl, caname strin
 	log.Debug("Processing DELETE request")
 
 	if !ctx.ca.Config.Cfg.Affiliations.AllowRemove {
-		return nil, newAuthErr(ErrUpdateConfigRemoveAff, "Affiliation removal is disabled")
+		return nil, caerrors.NewAuthorizationErr(caerrors.ErrUpdateConfigRemoveAff, "Affiliation removal is disabled")
 	}
 
 	removeAffiliation, err := ctx.GetVar("affiliation")
@@ -234,7 +228,7 @@ func processAffiliationDeleteRequest(ctx *serverRequestContextImpl, caname strin
 
 	callerAff := GetUserAffiliation(ctx.caller)
 	if callerAff == removeAffiliation {
-		return nil, newAuthErr(ErrUpdateConfigRemoveAff, "Can't remove affiliation '%s' because the caller is associated with this affiliation", removeAffiliation)
+		return nil, caerrors.NewAuthorizationErr(caerrors.ErrUpdateConfigRemoveAff, "Can't remove affiliation '%s' because the caller is associated with this affiliation", removeAffiliation)
 	}
 
 	err = ctx.ContainsAffiliation(removeAffiliation)
@@ -250,7 +244,7 @@ func processAffiliationDeleteRequest(ctx *serverRequestContextImpl, caname strin
 	_, isRegistrar, err := ctx.isRegistrar()
 	if err != nil {
 		httpErr := getHTTPErr(err)
-		if httpErr.lcode != 20 {
+		if httpErr.GetRemoteCode() != 20 {
 			return nil, err
 		}
 	}
@@ -286,7 +280,7 @@ func processAffiliationPostRequest(ctx *serverRequestContextImpl, caname string)
 	registry := ctx.ca.registry
 	_, err = registry.GetAffiliation(addAffiliation)
 	if err == nil {
-		return nil, newHTTPErr(400, ErrUpdateConfigAddAff, "Affiliation already exists")
+		return nil, caerrors.NewHTTPErr(400, caerrors.ErrUpdateConfigAddAff, "Affiliation already exists")
 	}
 
 	err = ctx.ContainsAffiliation(addAffiliation)
@@ -310,7 +304,7 @@ func processAffiliationPostRequest(ctx *serverRequestContextImpl, caname string)
 			affiliationPath = affiliationPath + addAff
 			err := registry.InsertAffiliation(affiliationPath, parentAffiliationPath, affLevel)
 			if err != nil {
-				return nil, newHTTPErr(500, ErrUpdateConfigAddAff, "Failed to add affiliations '%s': %s", addAffiliation, err)
+				return nil, caerrors.NewHTTPErr(500, caerrors.ErrUpdateConfigAddAff, "Failed to add affiliations '%s': %s", addAffiliation, err)
 			}
 			parentAffiliationPath = affiliationPath
 			affiliationPath = affiliationPath + "."
@@ -322,19 +316,19 @@ func processAffiliationPostRequest(ctx *serverRequestContextImpl, caname string)
 			_, err = registry.GetAffiliation(parentAffiliationPath)
 			if err != nil {
 				httpErr := getHTTPErr(err)
-				if httpErr.rcode == 400 {
-					return nil, newHTTPErr(400, ErrUpdateConfigAddAff, "Parent affiliation does not exist, 'force' option required on request to add affiliation")
+				if httpErr.GetStatusCode() == 400 {
+					return nil, caerrors.NewHTTPErr(400, caerrors.ErrUpdateConfigAddAff, "Parent affiliation does not exist, 'force' option required on request to add affiliation")
 				}
 				return nil, err
 			}
 			err := registry.InsertAffiliation(addAffiliation, parentAffiliationPath, affLevel)
 			if err != nil {
-				return nil, newHTTPErr(500, ErrUpdateConfigAddAff, "Failed to add affiliation '%s': %s", addAffiliation, err)
+				return nil, caerrors.NewHTTPErr(500, caerrors.ErrUpdateConfigAddAff, "Failed to add affiliation '%s': %s", addAffiliation, err)
 			}
 		} else {
 			err := registry.InsertAffiliation(addAffiliation, "", affLevel)
 			if err != nil {
-				return nil, newHTTPErr(500, ErrUpdateConfigAddAff, "Failed to add affiliation '%s': %s", addAffiliation, err)
+				return nil, caerrors.NewHTTPErr(500, caerrors.ErrUpdateConfigAddAff, "Failed to add affiliation '%s': %s", addAffiliation, err)
 			}
 		}
 
@@ -377,7 +371,7 @@ func processAffiliationPutRequest(ctx *serverRequestContextImpl, caname string) 
 	if forceStr != "" {
 		force, err = strconv.ParseBool(forceStr)
 		if err != nil {
-			return nil, newHTTPErr(500, ErrUpdateConfigAddAff, "The 'force' query parameter value must be a boolean: %s", err)
+			return nil, caerrors.NewHTTPErr(500, caerrors.ErrUpdateConfigAddAff, "The 'force' query parameter value must be a boolean: %s", err)
 		}
 
 	}
@@ -385,7 +379,7 @@ func processAffiliationPutRequest(ctx *serverRequestContextImpl, caname string) 
 	_, isRegistrar, err := ctx.isRegistrar()
 	if err != nil {
 		httpErr := getHTTPErr(err)
-		if httpErr.lcode != 20 {
+		if httpErr.GetLocalCode() != 20 {
 			return nil, err
 		}
 	}

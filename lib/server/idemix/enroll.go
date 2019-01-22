@@ -26,7 +26,7 @@ type EnrollmentResponse struct {
 	// Base64 encoding of idemix Credential
 	Credential string
 	// Attribute name-value pairs
-	Attrs map[string]string
+	Attrs map[string]interface{}
 	// Base64 encoding of Credential Revocation information
 	CRI string
 	// Base64 encoding of the issuer nonce
@@ -86,7 +86,7 @@ func (h *EnrollRequestHandler) HandleRequest() (*EnrollmentResponse, error) {
 	}
 
 	// Check the if credential request is valid
-	err = req.CredRequest.Check(ik.GetIPk())
+	err = req.CredRequest.Check(ik.GetIpk())
 	if err != nil {
 		log.Errorf("Invalid Idemix credential request: %s", err.Error())
 		return nil, errors.WithMessage(err, "Invalid Idemix credential request")
@@ -99,7 +99,7 @@ func (h *EnrollRequestHandler) HandleRequest() (*EnrollmentResponse, error) {
 	}
 
 	// Get attributes for the identity
-	attrMap, attrs, err := h.GetAttributeValues(caller, ik.GetIPk(), rh)
+	attrMap, attrs, err := h.GetAttributeValues(caller, ik.GetIpk(), rh)
 	if err != nil {
 		return nil, err
 	}
@@ -177,15 +177,15 @@ func (h *EnrollRequestHandler) Authenticate() error {
 }
 
 // GenerateNonce generates a nonce for an Idemix enroll request
-func (h *EnrollRequestHandler) GenerateNonce() *fp256bn.BIG {
+func (h *EnrollRequestHandler) GenerateNonce() (*fp256bn.BIG, error) {
 	return h.IdmxLib.RandModOrder(h.Issuer.IdemixRand())
 }
 
 // GetAttributeValues returns attribute values of the caller of Idemix enroll request
 func (h *EnrollRequestHandler) GetAttributeValues(caller spi.User, ipk *idemix.IssuerPublicKey,
-	rh *fp256bn.BIG) (map[string]string, []*fp256bn.BIG, error) {
+	rh *fp256bn.BIG) (map[string]interface{}, []*fp256bn.BIG, error) {
 	rc := []*fp256bn.BIG{}
-	attrMap := make(map[string]string)
+	attrMap := make(map[string]interface{})
 	for _, attrName := range ipk.AttributeNames {
 		if attrName == AttrEnrollmentID {
 			idBytes := []byte(caller.GetName())
@@ -204,17 +204,16 @@ func (h *EnrollRequestHandler) GetAttributeValues(caller spi.User, ipk *idemix.I
 			rc = append(rc, rh)
 			attrMap[attrName] = util.B64Encode(idemix.BigToBytes(rh))
 		} else if attrName == AttrRole {
-			isAdmin := false
-			attrObj, err := caller.GetAttribute("isAdmin")
+			role := MEMBER.getValue()
+			attrObj, err := caller.GetAttribute("role")
 			if err == nil {
-				isAdmin, err = strconv.ParseBool(attrObj.GetValue())
+				role, err = strconv.Atoi(attrObj.GetValue())
+				if err != nil {
+					log.Debugf("role attribute of user %s must be a integer value", caller.GetName())
+				}
 			}
-			role := 0
-			if isAdmin {
-				role = 1
-			}
-			rc = append(rc, fp256bn.NewBIGint(int(role)))
-			attrMap[attrName] = strconv.FormatBool(isAdmin)
+			rc = append(rc, fp256bn.NewBIGint(role))
+			attrMap[attrName] = role
 		} else {
 			attrObj, err := caller.GetAttribute(attrName)
 			if err != nil {

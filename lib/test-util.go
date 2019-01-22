@@ -38,6 +38,7 @@ import (
 const (
 	rootPort         = 7075
 	rootDir          = "rootDir"
+	rootClientDir    = "rootClientDir"
 	intermediatePort = 7076
 	intermediateDir  = "intDir"
 	testdataDir      = "../testdata"
@@ -167,7 +168,7 @@ func CopyFile(src, dst string) error {
 // GenerateECDSATestCert generates EC based certificate for testing purposes
 func GenerateECDSATestCert() error {
 	template := &x509.Certificate{
-		IsCA: true,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 		SubjectKeyId:          []byte{1, 2, 3},
 		SerialNumber:          big.NewInt(1234),
@@ -226,10 +227,15 @@ func GenerateECDSATestCert() error {
 // 	}
 // }
 
-// // GetTestClient returns a Fabric CA client
-// func GetTestClient(port int, home string) *Client {
-// 	return &Client{
-// 		Config:  &ClientConfig{URL: fmt.Sprintf("http://localhost:%d", port)},
-// 		HomeDir: home,
-// 	}
-// }
+// TestGetRootClient returns a Fabric CA client that is meant for a root Fabric CA server
+func TestGetRootClient() *Client {
+	return TestGetClient(rootPort, rootClientDir)
+}
+
+// TestGetClient returns a Fabric CA client
+func TestGetClient(port int, home string) *Client {
+	return &Client{
+		Config:  &ClientConfig{URL: fmt.Sprintf("http://localhost:%d", port)},
+		HomeDir: home,
+	}
+}

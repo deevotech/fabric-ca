@@ -871,7 +871,7 @@ func addTokenAuthHeader(req *http.Request, t *testing.T) {
 		t.Fatalf("Failed importing key %s", err)
 	}
 	emptyByte := make([]byte, 0)
-	token, err := util.CreateToken(CSP, cert, key, emptyByte)
+	token, err := util.CreateToken(CSP, cert, key, req.Method, req.URL.RequestURI(), emptyByte)
 	if err != nil {
 		t.Fatalf("Failed to add token authorization header: %s", err)
 	}
@@ -2027,7 +2027,7 @@ func TestSRVNewUserRegistryMySQL(t *testing.T) {
 	csp := util.GetDefaultBCCSP()
 	_, err := dbutil.NewUserRegistryMySQL(datasource, tlsConfig, csp)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "No TLS certificate files were provided")
+	assert.Contains(t, err.Error(), "No trusted root certificates for TLS were provided")
 
 	// Test with with a file that does not exist
 	tlsConfig = &libtls.ClientTLSConfig{
@@ -2381,6 +2381,22 @@ func TestRegistrationAffiliation(t *testing.T) {
 		Affiliation: ".",
 	})
 	assert.Error(t, err, "Should have failed, can't register a user with root affiliation if the registrar does not have root affiliation")
+}
+
+func TestCompEnvVar(t *testing.T) {
+	os.Setenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3", "badVal")
+	defer os.Unsetenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3")
+
+	os.RemoveAll(rootDir)
+	defer os.RemoveAll(rootDir)
+
+	server := TestGetRootServer(t)
+	err := server.Init(false)
+	util.ErrorContains(t, err, "parsing \"badVal\": invalid syntax", "Should error if using an invalid boolean value")
+
+	os.Setenv("FABRIC_CA_SERVER_COMPATIBILITY_MODE_V1_3", "true")
+	err = server.Init(false)
+	assert.NoError(t, err)
 }
 
 func cleanMultiCADir(t *testing.T) {

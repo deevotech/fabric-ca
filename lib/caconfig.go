@@ -82,19 +82,19 @@ type CAConfig struct {
 	Version      string `skip:"true"`
 	Cfg          CfgOptions
 	CA           CAInfo
-	Signing      *config.Signing
+	Signing      *config.Signing `skip:"true"`
 	CSR          api.CSRInfo
 	Registry     CAConfigRegistry
 	Affiliations map[string]interface{}
 	LDAP         ldap.Config
 	DB           CAConfigDB
-	CSP          *factory.FactoryOpts `mapstructure:"bccsp"`
+	CSP          *factory.FactoryOpts `mapstructure:"bccsp" hide:"true"`
 	// Optional client config for an intermediate server which acts as a client
 	// of the root (or parent) server
-	Client       *ClientConfig
+	Client       *ClientConfig `skip:"true"`
 	Intermediate IntermediateCA
 	CRL          CRLConfig
-	Idemix       idemix.Config `skip:"true"`
+	Idemix       idemix.Config
 }
 
 // CfgOptions is a CA configuration that allows for setting different options
@@ -105,7 +105,8 @@ type CfgOptions struct {
 
 // identitiesOptions are options that are related to identities
 type identitiesOptions struct {
-	AllowRemove bool `help:"Enables removal of identities dynamically"`
+	PasswordAttempts int  `def:"10" help:"Number of incorrect password attempts allowed"`
+	AllowRemove      bool `help:"Enables removal of identities dynamically"`
 }
 
 // affiliationsOptions are options that are related to affiliations

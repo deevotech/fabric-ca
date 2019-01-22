@@ -41,12 +41,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
-	"github.com/stretchr/testify/assert"
-
 	"github.com/cloudflare/cfssl/log"
 	"github.com/hyperledger/fabric/bccsp"
+	"github.com/pkg/errors"
 	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/ocsp"
 )
 
@@ -177,8 +176,10 @@ func Unmarshal(from []byte, to interface{}, what string) error {
 //    which is the body of an HTTP request, though could be any arbitrary bytes.
 // @param cert The pem-encoded certificate
 // @param key The pem-encoded key
+// @param method http method of the request
+// @param uri URI of the request
 // @param body The body of an HTTP request
-func CreateToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, body []byte) (string, error) {
+func CreateToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, method, uri string, body []byte) (string, error) {
 	x509Cert, err := GetX509CertificateFromPEM(cert)
 	if err != nil {
 		return "", err
@@ -197,7 +198,7 @@ func CreateToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, body []byte) (stri
 			}
 	*/
 	case *ecdsa.PublicKey:
-		token, err = GenECDSAToken(csp, cert, key, body)
+		token, err = GenECDSAToken(csp, cert, key, method, uri, body)
 		if err != nil {
 			return "", err
 		}
@@ -231,14 +232,19 @@ func GenRSAToken(csp bccsp.BCCSP, cert []byte, key []byte, body []byte) (string,
 */
 
 //GenECDSAToken signs the http body and cert with ECDSA using EC private key
-func GenECDSAToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, body []byte) (string, error) {
+func GenECDSAToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, method, uri string, body []byte) (string, error) {
 	b64body := B64Encode(body)
 	b64cert := B64Encode(cert)
-	bodyAndcert := b64body + "." + b64cert
+	b64uri := B64Encode([]byte(uri))
+	payload := method + "." + b64uri + "." + b64body + "." + b64cert
 
-	digest, digestError := csp.Hash([]byte(bodyAndcert), &bccsp.SHAOpts{})
+	return genECDSAToken(csp, key, b64cert, payload)
+}
+
+func genECDSAToken(csp bccsp.BCCSP, key bccsp.Key, b64cert, payload string) (string, error) {
+	digest, digestError := csp.Hash([]byte(payload), &bccsp.SHAOpts{})
 	if digestError != nil {
-		return "", errors.WithMessage(digestError, fmt.Sprintf("Hash failed on '%s'", bodyAndcert))
+		return "", errors.WithMessage(digestError, fmt.Sprintf("Hash failed on '%s'", payload))
 	}
 
 	ecSignature, err := csp.Sign(key, digest, nil)
@@ -258,7 +264,7 @@ func GenECDSAToken(csp bccsp.BCCSP, cert []byte, key bccsp.Key, body []byte) (st
 
 // VerifyToken verifies token signed by either ECDSA or RSA and
 // returns the associated user ID
-func VerifyToken(csp bccsp.BCCSP, token string, body []byte) (*x509.Certificate, error) {
+func VerifyToken(csp bccsp.BCCSP, token string, method, uri string, body []byte, compMode1_3 bool) (*x509.Certificate, error) {
 
 	if csp == nil {
 		return nil, errors.New("BCCSP instance is not present")
@@ -272,7 +278,8 @@ func VerifyToken(csp bccsp.BCCSP, token string, body []byte) (*x509.Certificate,
 		return nil, errors.WithMessage(err, "Invalid base64 encoded signature in token")
 	}
 	b64Body := B64Encode(body)
-	sigString := b64Body + "." + b64Cert
+	b64uri := B64Encode([]byte(uri))
+	sigString := method + "." + b64uri + "." + b64Body + "." + b64Cert
 
 	pk2, err := csp.KeyImport(x509Cert, &bccsp.X509PublicKeyImportOpts{Temporary: true})
 	if err != nil {
@@ -281,6 +288,7 @@ func VerifyToken(csp bccsp.BCCSP, token string, body []byte) (*x509.Certificate,
 	if pk2 == nil {
 		return nil, errors.New("Public Key Cannot be imported into BCCSP")
 	}
+
 	//bccsp.X509PublicKeyImportOpts
 	//Using default hash algo
 	digest, digestError := csp.Hash([]byte(sigString), &bccsp.SHAOpts{})
@@ -289,6 +297,15 @@ func VerifyToken(csp bccsp.BCCSP, token string, body []byte) (*x509.Certificate,
 	}
 
 	valid, validErr := csp.Verify(pk2, sig, digest, nil)
+	if compMode1_3 && !valid {
+		log.Debugf("Failed to verify token based on new authentication header requirements: %s", err)
+		sigString := b64Body + "." + b64Cert
+		digest, digestError := csp.Hash([]byte(sigString), &bccsp.SHAOpts{})
+		if digestError != nil {
+			return nil, errors.WithMessage(digestError, "Message digest failed")
+		}
+		valid, validErr = csp.Verify(pk2, sig, digest, nil)
+	}
 
 	if validErr != nil {
 		return nil, errors.WithMessage(validErr, "Token signature validation failure")
@@ -355,7 +372,7 @@ func GetRSAPrivateKey(raw []byte) (*rsa.PrivateKey, error) {
 	if err == nil {
 		return RSAprivKey, nil
 	}
-	key, err2 := x509.ParsePKCS8PrivateKey(raw)
+	key, err2 := x509.ParsePKCS8PrivateKey(decoded.Bytes)
 	if err2 == nil {
 		switch key.(type) {
 		case *ecdsa.PrivateKey:

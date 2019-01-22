@@ -1,17 +1,7 @@
 /*
-Copyright IBM Corp. 2018 All Rights Reserved.
+Copyright IBM Corp. All Rights Reserved.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-                 http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 */
 
 package lib
@@ -22,7 +12,8 @@ import (
 	"os"
 
 	"github.com/cloudflare/cfssl/log"
-	"github.com/hyperledger/fabric-ca/lib/server"
+	"github.com/hyperledger/fabric-ca/lib/caerrors"
+	"github.com/hyperledger/fabric-ca/lib/server/certificaterequest"
 	"github.com/hyperledger/fabric-ca/util"
 	"github.com/pkg/errors"
 )
@@ -93,7 +84,7 @@ func authChecks(ctx ServerRequestContext) error {
 	if err != nil {
 		err = ctx.HasRole("hf.Revoker")
 		if err != nil {
-			return newAuthErr(ErrAuthFailure, "Caller does not posses either hf.Registrar.Roles or hf.Revoker attribute")
+			return caerrors.NewAuthorizationErr(caerrors.ErrAuthorizationFailure, "Caller does not posses either hf.Registrar.Roles or hf.Revoker attribute")
 		}
 	}
 
@@ -104,9 +95,9 @@ func processGetCertificateRequest(ctx ServerRequestContext) error {
 	log.Debug("Processing GET certificate request")
 	var err error
 
-	req, err := server.NewCertificateRequest(ctx)
+	req, err := certificaterequest.NewCertificateRequest(ctx)
 	if err != nil {
-		return newHTTPErr(400, ErrGettingCert, "Invalid Request: %s", err)
+		return caerrors.NewHTTPErr(400, caerrors.ErrGettingCert, "Invalid Request: %s", err)
 	}
 
 	// Execute DB query and stream response
@@ -119,7 +110,7 @@ func processGetCertificateRequest(ctx ServerRequestContext) error {
 }
 
 // getCertificates executes the DB query and streams the results to client
-func getCertificates(ctx ServerRequestContext, req *server.CertificateRequestImpl) error {
+func getCertificates(ctx ServerRequestContext, req *certificaterequest.Impl) error {
 	w := ctx.GetResp()
 	flusher, _ := w.(http.Flusher)
 
@@ -151,7 +142,7 @@ func getCertificates(ctx ServerRequestContext, req *server.CertificateRequestImp
 		var cert certPEM
 		err := rows.StructScan(&cert)
 		if err != nil {
-			return newHTTPErr(500, ErrGettingCert, "Failed to get read row: %s", err)
+			return caerrors.NewHTTPErr(500, caerrors.ErrGettingCert, "Failed to get read row: %s", err)
 		}
 
 		if rowNumber > 1 {
@@ -160,7 +151,7 @@ func getCertificates(ctx ServerRequestContext, req *server.CertificateRequestImp
 
 		resp, err := util.Marshal(cert, "certificate")
 		if err != nil {
-			return newHTTPErr(500, ErrGettingCert, "Failed to marshal certificate: %s", err)
+			return caerrors.NewHTTPErr(500, caerrors.ErrGettingCert, "Failed to marshal certificate: %s", err)
 		}
 		w.Write(resp)
 

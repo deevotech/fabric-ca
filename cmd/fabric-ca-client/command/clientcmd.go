@@ -50,7 +50,10 @@ type Command interface {
 	GetClientCfg() *lib.ClientConfig
 	// Returns viper instance associated with this comamnd
 	GetViper() *viper.Viper
+	// Returns the client's home directoty
 	GetHomeDirectory() string
+	// Set the default level to be something other than 'info'
+	SetDefaultLogLevel(string)
 }
 
 type crlArgs struct {
@@ -109,8 +112,8 @@ type ClientCmd struct {
 	dynamicIdentity identityArgs
 	// Dynamically configuring affiliations
 	dynamicAffiliation affiliationArgs
-	// Enable debug level logging
-	debug bool
+	// Set to log level
+	logLevel string
 }
 
 // NewCommand returns new ClientCmd ready for running
@@ -200,13 +203,13 @@ func (c *ClientCmd) registerFlags() {
 		"Hostname to include in the certificate signing request during enrollment")
 	pflags.StringSliceVarP(
 		&c.cfgCsrNames, "csr.names", "", nil, "A list of comma-separated CSR names of the form <name>=<value> (e.g. C=CA,O=Org1)")
-	pflags.BoolVarP(&c.debug, "debug", "d", false, "Enable debug level logging")
 
 	c.clientCfg = &lib.ClientConfig{}
 	tags := map[string]string{
-		"help.csr.cn":           "The common name field of the certificate signing request",
-		"help.csr.serialnumber": "The serial number in a certificate signing request",
-		"help.csr.hosts":        "A list of space-separated host names in a certificate signing request",
+		"help.csr.cn":                "The common name field of the certificate signing request",
+		"help.csr.serialnumber":      "The serial number in a certificate signing request",
+		"help.csr.hosts":             "A list of space-separated host names in a certificate signing request",
+		"skip.csp.pluginopts.config": "true", // Skipping because this a map
 	}
 	err = util.RegisterFlags(c.myViper, pflags, c.clientCfg, tags)
 	if err != nil {
@@ -282,4 +285,9 @@ func (c *ClientCmd) GetCfgFileName() string {
 // GetViper returns the viper instance
 func (c *ClientCmd) GetViper() *viper.Viper {
 	return c.myViper
+}
+
+// SetDefaultLogLevel sets the default log level for a command to a specific level
+func (c *ClientCmd) SetDefaultLogLevel(logLevel string) {
+	c.logLevel = logLevel
 }

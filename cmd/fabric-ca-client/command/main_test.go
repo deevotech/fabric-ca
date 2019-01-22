@@ -26,8 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric-ca/lib/spi"
-
 	"github.com/cloudflare/cfssl/csr"
 	"github.com/cloudflare/cfssl/log"
 	"github.com/hyperledger/fabric-ca/api"
@@ -35,6 +33,7 @@ import (
 	"github.com/hyperledger/fabric-ca/lib/attr"
 	"github.com/hyperledger/fabric-ca/lib/dbutil"
 	"github.com/hyperledger/fabric-ca/lib/metadata"
+	"github.com/hyperledger/fabric-ca/lib/spi"
 	"github.com/hyperledger/fabric-ca/util"
 	"github.com/hyperledger/fabric/common/attrmgr"
 	"github.com/stretchr/testify/assert"
@@ -995,7 +994,7 @@ func testGetCACert(t *testing.T) {
 	os.RemoveAll("msp")
 	err := RunMain([]string{cmdName, "getcacert", "-d", "-u", serverURL})
 	assert.NoError(t, err, "getcacert should not have failed")
-	//assert.True(t, util.FileExists(path.Dir(defYaml)+"/msp/IssuerPublicKey"), "IssuerPublicKey file should exist after getcacert call")
+	assert.True(t, util.FileExists(path.Dir(defYaml)+"/msp/IssuerPublicKey"), "IssuerPublicKey file should exist after getcacert call")
 
 	err = RunMain([]string{cmdName, "getcacert", "-d", "-u", "http://localhost:9999"})
 	if err == nil {
@@ -1029,7 +1028,13 @@ func testEnroll(t *testing.T) {
 		t.Errorf("No username/password provided, should have errored")
 	}
 
-	err = RunMain([]string{cmdName, "enroll", "-u", enrollURL, "-M", filepath.Join(filepath.Dir(defYaml), "msp")})
+	err = RunMain([]string{cmdName, "enroll", "-d", "-u", enrollURL, "-M", filepath.Join(filepath.Dir(defYaml), "msp"), "--csr.keyrequest.algo", "badalgo"})
+	assert.Error(t, err, "Incorrect key algo value, should fail")
+
+	err = RunMain([]string{cmdName, "enroll", "-d", "-u", enrollURL, "-M", filepath.Join(filepath.Dir(defYaml), "msp"), "--csr.keyrequest.algo", "ecdsa", "--csr.keyrequest.size", "1234"})
+	assert.Error(t, err, "Incorrect key size value, should fail")
+
+	err = RunMain([]string{cmdName, "enroll", "-u", enrollURL, "-M", filepath.Join(filepath.Dir(defYaml), "msp"), "--csr.keyrequest.algo", "ecdsa", "--csr.keyrequest.size", "256"})
 	if err != nil {
 		t.Errorf("client enroll -u failed: %s", err)
 	}
@@ -2131,6 +2136,49 @@ func TestDebugSetting(t *testing.T) {
 	err = RunMain([]string{cmdName, "identity", "list", "-d"})
 	assert.NoError(t, err, "Failed to return all affiliations")
 	assert.Equal(t, 0, log.Level) // With '-d' flag log level should be debug (0)
+}
+
+func TestClientLogLevelCLI(t *testing.T) {
+	// Not passing in -u flag, don't need for the enroll to complete successfully to
+	// verify that the log level is correctly getting set
+	RunMain([]string{cmdName, "enroll", "--loglevel", "info"})
+	assert.Equal(t, log.Level, log.LevelInfo)
+
+	RunMain([]string{cmdName, "enroll", "--loglevel", "debug"})
+	assert.Equal(t, log.Level, log.LevelDebug)
+
+	RunMain([]string{cmdName, "enroll", "--loglevel", "warning"})
+	assert.Equal(t, log.Level, log.LevelWarning)
+
+	RunMain([]string{cmdName, "enroll", "--loglevel", "fatal"})
+	assert.Equal(t, log.Level, log.LevelFatal)
+
+	RunMain([]string{cmdName, "enroll", "--loglevel", "critical"})
+	assert.Equal(t, log.Level, log.LevelCritical)
+}
+
+func TestClientLogLevelEnvVar(t *testing.T) {
+	// Not passing in -u flag, don't need for the enroll to complete successfully to
+	// verify that the log level is correctly getting set
+	os.Setenv("FABRIC_CA_CLIENT_LOGLEVEL", "info")
+	RunMain([]string{cmdName, "enroll"})
+	assert.Equal(t, log.Level, log.LevelInfo)
+
+	os.Setenv("FABRIC_CA_CLIENT_LOGLEVEL", "debug")
+	RunMain([]string{cmdName, "enroll"})
+	assert.Equal(t, log.Level, log.LevelDebug)
+
+	os.Setenv("FABRIC_CA_CLIENT_LOGLEVEL", "warning")
+	RunMain([]string{cmdName, "enroll"})
+	assert.Equal(t, log.Level, log.LevelWarning)
+
+	os.Setenv("FABRIC_CA_CLIENT_LOGLEVEL", "fatal")
+	RunMain([]string{cmdName, "enroll"})
+	assert.Equal(t, log.Level, log.LevelFatal)
+
+	os.Setenv("FABRIC_CA_CLIENT_LOGLEVEL", "critical")
+	RunMain([]string{cmdName, "enroll"})
+	assert.Equal(t, log.Level, log.LevelCritical)
 }
 
 func TestCleanUp(t *testing.T) {

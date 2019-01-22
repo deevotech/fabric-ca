@@ -26,7 +26,7 @@ const (
 	// SelectRAInfo is the query string for getting revocation authority info
 	SelectRAInfo = "SELECT * FROM revocation_authority_info"
 	// UpdateNextAndLastHandle is the SQL for updating next and last revocation handle
-	UpdateNextAndLastHandle = "UPDATE revocation_authority_info SET next_handle = ? AND lasthandle_in_pool = ? WHERE (epoch = ?)"
+	UpdateNextAndLastHandle = "UPDATE revocation_authority_info SET next_handle = ?, lasthandle_in_pool = ?, epoch = ? WHERE (epoch = ?)"
 	// UpdateNextHandle s the SQL for updating next revocation handle
 	UpdateNextHandle = "UPDATE revocation_authority_info SET next_handle = ? WHERE (epoch = ?)"
 	// DefaultRevocationHandlePoolSize is the default revocation handle pool size
@@ -109,7 +109,7 @@ func NewRevocationAuthority(issuer MyIssuer, level int) (RevocationAuthority, er
 }
 
 func (ra *revocationAuthority) initKeyMaterial(renew bool) error {
-	//log.Debug("Initialize Idemix issuer revocation key material")
+	log.Debug("Initialize Idemix issuer revocation key material")
 	revocationPubKey := ra.issuer.Config().RevocationPublicKeyfile
 	revocationPrivKey := ra.issuer.Config().RevocationPrivateKeyfile
 	rk := NewRevocationKey(revocationPubKey, revocationPrivKey, ra.issuer.IdemixLib())
@@ -119,9 +119,9 @@ func (ra *revocationAuthority) initKeyMaterial(renew bool) error {
 		privKeyFileExists := util.FileExists(revocationPrivKey)
 		// If they both exist, the CA was already initialized, load the keys from the disk
 		if pubKeyFileExists && privKeyFileExists {
-			//log.Info("The Idemix issuer revocation public and secret key files already exist")
-			//log.Infof("   private key file location: %s", revocationPrivKey)
-			//log.Infof("   public key file location: %s", revocationPubKey)
+			log.Info("The Idemix issuer revocation public and secret key files already exist")
+			log.Infof("   private key file location: %s", revocationPrivKey)
+			log.Infof("   public key file location: %s", revocationPubKey)
 			err := rk.Load()
 			if err != nil {
 				return errors.WithMessage(err, fmt.Sprintf("Failed to load revocation key for issuer '%s'", ra.issuer.Name()))
@@ -135,7 +135,7 @@ func (ra *revocationAuthority) initKeyMaterial(renew bool) error {
 		return errors.WithMessage(err,
 			fmt.Sprintf("Failed to generate revocation key for issuer '%s'", ra.issuer.Name()))
 	}
-	//log.Infof("Idemix issuer revocation public and secret keys were generated for CA '%s'", ra.issuer.Name())
+	log.Infof("Idemix issuer revocation public and secret keys were generated for CA '%s'", ra.issuer.Name())
 	err = rk.Store()
 	if err != nil {
 		return errors.WithMessage(err, fmt.Sprintf("Failed to store revocation key of issuer '%s'", ra.issuer.Name()))
@@ -167,9 +167,6 @@ func (ra *revocationAuthority) CreateCRI() (*idemix.CredentialRevocationInformat
 	unrevokedHandles := ra.getUnRevokedHandles(info, revokedCreds)
 
 	alg := idemix.ALG_NO_REVOCATION
-	if len(revokedCreds) > 0 {
-		alg = idemix.ALG_PLAIN_SIGNATURE
-	}
 	cri, err := ra.issuer.IdemixLib().CreateCRI(ra.key.GetKey(), unrevokedHandles, info.Epoch, alg, ra.issuer.IdemixRand())
 	if err != nil {
 		return nil, err
@@ -296,7 +293,7 @@ func (ra *revocationAuthority) getNextRevocationHandleTx(tx dbutil.FabricCATx, a
 		newLastHandleInPool := rcInfo.LastHandleInPool + ra.issuer.Config().RHPoolSize
 		newEpoch := rcInfo.Epoch + 1
 		query = UpdateNextAndLastHandle
-		inQuery, args, err = sqlx.In(query, newNextHandle, newLastHandleInPool, newEpoch)
+		inQuery, args, err = sqlx.In(query, newNextHandle, newLastHandleInPool, newEpoch, rcInfo.Epoch)
 	} else {
 		query = UpdateNextHandle
 		inQuery, args, err = sqlx.In(query, newNextHandle, rcInfo.Epoch)
