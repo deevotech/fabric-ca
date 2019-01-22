@@ -425,17 +425,10 @@
 			"revisionTime": "2018-03-16T15:29:36Z"
 		},
 		{
-<<<<<<< HEAD
-			"checksumSHA1": "qqnvCuyimtX23HjW9zPZIA5QwhQ=",
-			"path": "github.com/hyperledger/fabric/bccsp",
-			"revision": "644f38d078108bdb276b21810223a9388cb7ed1c",
-			"revisionTime": "2018-08-27T13:01:29Z",
-=======
 			"checksumSHA1": "SciKezSPmS5x+LFe2AB2ERbxtF0=",
 			"path": "github.com/hyperledger/fabric/bccsp",
 			"revision": "5b2b5616d49538ace14aa9e08a482b9089c78df8",
 			"revisionTime": "2018-12-05T11:40:09Z",
->>>>>>> 3dafa329abcfb4817c5f91a82768e7867ef7865e
 			"tree": true
 		},
 		{
